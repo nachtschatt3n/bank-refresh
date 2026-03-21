@@ -105,3 +105,7 @@ The timer runs only while the menu bar app is open.
 ## Notes
 
 - The repo intentionally tracks source files only; the built `.app` bundle is generated.
+
+## License
+
+GPL-2.0. See [`LICENSE`](./LICENSE).
