@@ -29,30 +29,37 @@ The bundled AppleScript clicks these exact UI items:
 - `File`
 - `Refresh All Accounts`
 
-If MoneyMoney is localized to another language, the script will not find those menu entries and the refresh will fail. To support another language, update the menu titles in [`refresh-moneymoney.applescript`](/Users/mu/code/bank-refresh/refresh-moneymoney.applescript).
+If MoneyMoney is localized to another language, the script will not find those menu entries and the refresh will fail. To support another language, update the menu titles in [`refresh-moneymoney.applescript`](./refresh-moneymoney.applescript).
 
 ## Setup
 
-1. Build the app:
+1. Clone the repository:
 
 ```sh
-/Users/mu/code/bank-refresh/build-native-app.sh
+git clone git@github.com:nachtschatt3n/bank-refresh.git
+cd bank-refresh
 ```
 
-2. Install it to `/Applications`:
+2. Build the app:
 
 ```sh
-mv /Users/mu/code/bank-refresh/RefreshMoneyMoney.app /Applications/RefreshMoneyMoney.app
+./build-native-app.sh
 ```
 
-3. Open macOS System Settings:
+3. Install it to `/Applications`:
+
+```sh
+mv ./RefreshMoneyMoney.app /Applications/RefreshMoneyMoney.app
+```
+
+4. Open macOS System Settings:
    `System Settings > Privacy & Security > Accessibility`
 
-4. Add `/Applications/RefreshMoneyMoney.app` to the Accessibility list and enable it.
+5. Add `/Applications/RefreshMoneyMoney.app` to the Accessibility list and enable it.
 
-5. If macOS shows a permission prompt the first time the app runs, allow it.
+6. If macOS shows a permission prompt the first time the app runs, allow it.
 
-6. Launch the app:
+7. Launch the app:
 
 ```sh
 open /Applications/RefreshMoneyMoney.app
@@ -92,7 +99,7 @@ The timer runs only while the menu bar app is open.
 ## Test
 
 ```sh
-/Users/mu/code/bank-refresh/tests/smoke-test.sh
+./tests/smoke-test.sh
 ```
 
 ## Notes
