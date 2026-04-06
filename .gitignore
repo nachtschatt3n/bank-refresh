@@ -1,3 +1,14 @@
 .DS_Store
 .build/
 RefreshMoneyMoney.app/
+
+# Node
+node_modules/
+
+# Runtime state (contains transaction data and logs)
+.categorizer/
+
+# Environment config (contains credentials)
+.env
+.env.local
+!.env.example

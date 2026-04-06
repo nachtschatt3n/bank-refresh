@@ -8,9 +8,255 @@ struct RefreshInterval: Equatable {
 enum RefreshVisualState {
     case idle
     case refreshing
+    case syncing
     case success
     case failure
 }
+
+// ─── Settings ────────────────────────────────────────────────────────────────
+
+final class SettingsStore {
+    private let envFilePath: String
+
+    struct EnvConfig {
+        var actualURL: String
+        var actualPassword: String
+        var actualSyncId: String
+        var actualAccountId: String
+        var ollamaURL: String
+        var ollamaModel: String
+        var dnsServer: String
+    }
+
+    init(scriptDir: String) {
+        envFilePath = "\(scriptDir)/.env"
+    }
+
+    func load() -> EnvConfig {
+        var config = EnvConfig(
+            actualURL: "", actualPassword: "", actualSyncId: "", actualAccountId: "",
+            ollamaURL: "http://localhost:11434", ollamaModel: "gemma4:26b", dnsServer: ""
+        )
+
+        guard let contents = try? String(contentsOfFile: envFilePath, encoding: .utf8) else {
+            return config
+        }
+
+        for line in contents.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#"),
+                  let eqIdx = trimmed.firstIndex(of: "=") else { continue }
+            let key = String(trimmed[trimmed.startIndex..<eqIdx]).trimmingCharacters(in: .whitespaces)
+            let val = String(trimmed[trimmed.index(after: eqIdx)...]).trimmingCharacters(in: .whitespaces)
+            switch key {
+            case "ACTUAL_URL": config.actualURL = val
+            case "ACTUAL_PASSWORD": config.actualPassword = val
+            case "ACTUAL_SYNC_ID": config.actualSyncId = val
+            case "ACTUAL_ACCOUNT_ID": config.actualAccountId = val
+            case "OLLAMA_URL": config.ollamaURL = val
+            case "OLLAMA_MODEL": config.ollamaModel = val
+            case "DNS_SERVER": config.dnsServer = val
+            default: break
+            }
+        }
+        return config
+    }
+
+    func save(_ config: EnvConfig) {
+        let lines = [
+            "ACTUAL_URL=\(config.actualURL)",
+            "ACTUAL_PASSWORD=\(config.actualPassword)",
+            "ACTUAL_SYNC_ID=\(config.actualSyncId)",
+            "ACTUAL_ACCOUNT_ID=\(config.actualAccountId)",
+            "OLLAMA_URL=\(config.ollamaURL)",
+            "OLLAMA_MODEL=\(config.ollamaModel)",
+            "DNS_SERVER=\(config.dnsServer)",
+        ]
+        try? lines.joined(separator: "\n").appending("\n").write(toFile: envFilePath, atomically: true, encoding: .utf8)
+    }
+}
+
+final class SettingsWindowController {
+    private var window: NSWindow?
+    private let store: SettingsStore
+
+    // Fields
+    private let actualURLField = NSTextField()
+    private let actualPasswordField = NSSecureTextField()
+    private let actualSyncIdField = NSTextField()
+    private let actualAccountIdField = NSTextField()
+    private let ollamaURLField = NSTextField()
+    private let ollamaModelField = NSTextField()
+    private let dnsServerField = NSTextField()
+    private let statusLabel = NSTextField(labelWithString: "")
+
+    init(store: SettingsStore) {
+        self.store = store
+    }
+
+    func show() {
+        if let existing = window, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 420),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        w.title = "Settings"
+        w.center()
+        w.isReleasedWhenClosed = false
+
+        let content = NSView(frame: w.contentView!.bounds)
+        content.autoresizingMask = [.width, .height]
+        w.contentView = content
+
+        var y: CGFloat = 385
+
+        func addSection(_ title: String) {
+            let label = NSTextField(labelWithString: title)
+            label.font = .boldSystemFont(ofSize: 13)
+            label.frame = NSRect(x: 20, y: y, width: 480, height: 20)
+            content.addSubview(label)
+            y -= 30
+        }
+
+        func addRow(_ title: String, field: NSTextField, secure: Bool = false) {
+            let label = NSTextField(labelWithString: title)
+            label.frame = NSRect(x: 20, y: y, width: 150, height: 22)
+            label.alignment = .right
+            content.addSubview(label)
+
+            field.frame = NSRect(x: 180, y: y, width: 320, height: 22)
+            field.isEditable = true
+            field.isBezeled = true
+            field.bezelStyle = .roundedBezel
+            field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            content.addSubview(field)
+            y -= 30
+        }
+
+        addSection("Actual Budget")
+        addRow("Server URL", field: actualURLField)
+        addRow("Password", field: actualPasswordField, secure: true)
+        addRow("Sync ID", field: actualSyncIdField)
+        addRow("Account ID", field: actualAccountIdField)
+
+        y -= 10
+        addSection("Ollama (AI Categorizer)")
+        addRow("Ollama URL", field: ollamaURLField)
+        addRow("Model", field: ollamaModelField)
+
+        y -= 10
+        addSection("Advanced")
+        addRow("DNS Server", field: dnsServerField)
+
+        y -= 15
+        statusLabel.frame = NSRect(x: 20, y: y, width: 300, height: 20)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.font = .systemFont(ofSize: 11)
+        content.addSubview(statusLabel)
+
+        let saveButton = NSButton(title: "Save", target: self, action: #selector(save))
+        saveButton.frame = NSRect(x: 410, y: y - 3, width: 90, height: 28)
+        saveButton.bezelStyle = .rounded
+        saveButton.keyEquivalent = "\r"
+        content.addSubview(saveButton)
+
+        let testButton = NSButton(title: "Test", target: self, action: #selector(testConnection))
+        testButton.frame = NSRect(x: 320, y: y - 3, width: 80, height: 28)
+        testButton.bezelStyle = .rounded
+        content.addSubview(testButton)
+
+        // Load current values
+        let config = store.load()
+        actualURLField.stringValue = config.actualURL
+        actualPasswordField.stringValue = config.actualPassword
+        actualSyncIdField.stringValue = config.actualSyncId
+        actualAccountIdField.stringValue = config.actualAccountId
+        ollamaURLField.stringValue = config.ollamaURL
+        ollamaModelField.stringValue = config.ollamaModel
+        dnsServerField.stringValue = config.dnsServer
+
+        self.window = w
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func save() {
+        let config = SettingsStore.EnvConfig(
+            actualURL: actualURLField.stringValue,
+            actualPassword: actualPasswordField.stringValue,
+            actualSyncId: actualSyncIdField.stringValue,
+            actualAccountId: actualAccountIdField.stringValue,
+            ollamaURL: ollamaURLField.stringValue,
+            ollamaModel: ollamaModelField.stringValue,
+            dnsServer: dnsServerField.stringValue
+        )
+        store.save(config)
+        statusLabel.stringValue = "Saved"
+        statusLabel.textColor = .systemGreen
+    }
+
+    @objc private func testConnection() {
+        statusLabel.stringValue = "Testing..."
+        statusLabel.textColor = .secondaryLabelColor
+
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            var results: [String] = []
+
+            // Test Ollama
+            let ollamaOk = Self.httpGet("\(ollamaURLField.stringValue)/api/tags", timeout: 5)
+            results.append(ollamaOk ? "Ollama: OK" : "Ollama: unreachable")
+
+            // Test Actual Budget (via curl for DNS)
+            let abOk = Self.curlTest(actualURLField.stringValue + "/info")
+            results.append(abOk ? "Actual Budget: OK" : "Actual Budget: unreachable")
+
+            DispatchQueue.main.async {
+                let allOk = ollamaOk && abOk
+                self.statusLabel.stringValue = results.joined(separator: "  |  ")
+                self.statusLabel.textColor = allOk ? .systemGreen : .systemOrange
+            }
+        }
+    }
+
+    private static func httpGet(_ urlString: String, timeout: TimeInterval) -> Bool {
+        guard let url = URL(string: urlString) else { return false }
+        let sem = DispatchSemaphore(value: 0)
+        var ok = false
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = timeout
+        let session = URLSession(configuration: config)
+        session.dataTask(with: url) { _, response, _ in
+            ok = (response as? HTTPURLResponse)?.statusCode == 200
+            sem.signal()
+        }.resume()
+        sem.wait()
+        return ok
+    }
+
+    private static func curlTest(_ urlString: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        process.arguments = ["-sf", "--connect-timeout", "5", urlString]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+}
+
+// ─── Refresh Controller ──────────────────────────────────────────────────────
 
 final class RefreshController {
     private let defaults = UserDefaults.standard
@@ -23,9 +269,12 @@ final class RefreshController {
     ]
 
     private var timer: Timer?
-    private(set) var isRefreshing = false
+    private(set) var isBusy = false
+    private(set) var currentPhase = "Idle" // "Refreshing...", "Syncing...", "Categorizing..."
     private(set) var lastRefreshDate: Date?
+    private(set) var lastSyncDate: Date?
     private(set) var lastResultText = "Idle"
+    private(set) var lastSyncResultText = "Idle"
 
     var onStatusChange: (() -> Void)?
 
@@ -43,15 +292,19 @@ final class RefreshController {
     }
 
     var visualState: RefreshVisualState {
-        if isRefreshing {
+        if isBusy && currentPhase == "Refreshing..." {
             return .refreshing
         }
 
-        if lastResultText == "Success" {
+        if isBusy {
+            return .syncing
+        }
+
+        if lastResultText == "Success" && !lastSyncResultText.hasPrefix("Sync failed") && !lastSyncResultText.hasPrefix("Categorize failed") {
             return .success
         }
 
-        if lastResultText.hasPrefix("Failed:") {
+        if lastResultText.hasPrefix("Failed:") || lastSyncResultText.hasPrefix("Sync failed") || lastSyncResultText.hasPrefix("Categorize failed") {
             return .failure
         }
 
@@ -70,29 +323,82 @@ final class RefreshController {
     }
 
     func refreshNow() {
-        guard !isRefreshing else {
-            lastResultText = "Refresh already running"
-            onStatusChange?()
-            return
-        }
+        guard !isBusy else { return }
 
-        isRefreshing = true
+        isBusy = true
+        currentPhase = "Refreshing..."
         lastResultText = "Refreshing..."
         onStatusChange?()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else {
-                return
-            }
+            guard let self else { return }
+            self.doRefreshSyncCategorize()
+        }
+    }
 
-            let result = self.runAppleScript()
+    func syncNow() {
+        guard !isBusy else { return }
 
-            DispatchQueue.main.async {
-                self.isRefreshing = false
-                self.lastRefreshDate = Date()
-                self.lastResultText = result
-                self.onStatusChange?()
+        isBusy = true
+        currentPhase = "Syncing..."
+        lastSyncResultText = "Syncing..."
+        onStatusChange?()
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            self.doSyncCategorize()
+        }
+    }
+
+    private func doRefreshSyncCategorize() {
+        let refreshResult = runAppleScript()
+
+        DispatchQueue.main.sync {
+            lastRefreshDate = Date()
+            lastResultText = refreshResult
+            onStatusChange?()
+        }
+
+        guard refreshResult == "Success" else {
+            DispatchQueue.main.sync { isBusy = false; onStatusChange?() }
+            return
+        }
+
+        doSyncCategorize()
+    }
+
+    private func doSyncCategorize() {
+        DispatchQueue.main.sync {
+            currentPhase = "Syncing..."
+            lastSyncResultText = "Syncing..."
+            onStatusChange?()
+        }
+
+        let syncResult = runSync()
+
+        guard syncResult == "Success" else {
+            DispatchQueue.main.sync {
+                isBusy = false
+                lastSyncDate = Date()
+                lastSyncResultText = syncResult
+                onStatusChange?()
             }
+            return
+        }
+
+        DispatchQueue.main.sync {
+            currentPhase = "Categorizing..."
+            lastSyncResultText = "Categorizing..."
+            onStatusChange?()
+        }
+
+        let catResult = runCategorize()
+
+        DispatchQueue.main.sync {
+            isBusy = false
+            lastSyncDate = Date()
+            lastSyncResultText = catResult
+            onStatusChange?()
         }
     }
 
@@ -126,6 +432,126 @@ final class RefreshController {
         }
     }
 
+    private lazy var nodeBinDir: String = {
+        let candidates = [
+            "\(NSHomeDirectory())/.local/share/mise/installs/node/\(Self.findMiseNodeVersion(scriptDir: scriptDir))/bin",
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: "\($0)/node") }
+            ?? "/usr/local/bin"
+    }()
+
+    private static func findMiseNodeVersion(scriptDir: String) -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/mise")
+        process.arguments = ["which", "node"]
+        // Run mise from the project dir so it picks up .mise.toml
+        process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               let match = path.range(of: #"installs/node/([^/]+)"#, options: .regularExpression) {
+                return String(path[match]).replacingOccurrences(of: "installs/node/", with: "")
+            }
+        } catch {}
+        return "latest"
+    }
+
+    lazy var scriptDir: String = {
+        let candidates = [
+            Bundle.main.bundlePath.replacingOccurrences(of: "/RefreshMoneyMoney.app", with: ""),
+            "\(NSHomeDirectory())/code/bank-refresh",
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: "\($0)/categorize-transactions.mjs") }
+            ?? "\(NSHomeDirectory())/code/bank-refresh"
+    }()
+
+    private func swiftLog(_ msg: String) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(ts)] [SWIFT] \(msg)\n"
+        let logPath = "\(scriptDir)/.categorizer/swift-debug.log"
+        try? FileManager.default.createDirectory(atPath: "\(scriptDir)/.categorizer", withIntermediateDirectories: true)
+        if let handle = FileHandle(forWritingAtPath: logPath) {
+            handle.seekToEndOfFile()
+            handle.write(line.data(using: .utf8)!)
+            handle.closeFile()
+        } else {
+            FileManager.default.createFile(atPath: logPath, contents: line.data(using: .utf8))
+        }
+    }
+
+    private func runSync() -> String {
+        swiftLog("runSync start, nodeBinDir=\(nodeBinDir), scriptDir=\(scriptDir)")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "\(nodeBinDir)/actual-monmon")
+        process.arguments = ["import"]
+        process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "\(nodeBinDir):\(env["PATH"] ?? "/usr/bin:/bin")"
+        process.environment = env
+
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            swiftLog("runSync exit=\(process.terminationStatus)")
+            if process.terminationStatus == 0 {
+                return "Success"
+            } else {
+                return "Sync failed (exit \(process.terminationStatus))"
+            }
+        } catch {
+            swiftLog("runSync error: \(error.localizedDescription)")
+            return "Sync failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func runCategorize() -> String {
+        swiftLog("runCategorize start")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "\(nodeBinDir)/node")
+        process.arguments = ["\(scriptDir)/categorize-transactions.mjs"]
+        process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "\(nodeBinDir):\(env["PATH"] ?? "/usr/bin:/bin")"
+        // Suppress noisy @actual-app/api Breadcrumb output
+        env["NODE_NO_WARNINGS"] = "1"
+        process.environment = env
+
+        // Discard stdout/stderr — results go to .categorizer/status.json and log
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 {
+                return "Success"
+            } else {
+                // Read error from status file instead of noisy pipe
+                let statusPath = "\(scriptDir)/.categorizer/status.json"
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: statusPath)),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let lastError = json["lastError"] as? String, !lastError.isEmpty {
+                    return "Categorize failed: \(lastError)"
+                }
+                return "Categorize failed (exit \(process.terminationStatus))"
+            }
+        } catch {
+            return "Categorize failed: \(error.localizedDescription)"
+        }
+    }
+
     private func describe(_ errorInfo: NSDictionary) -> String {
         let message = errorInfo[NSAppleScript.errorMessage] as? String
         let number = errorInfo[NSAppleScript.errorNumber] as? Int
@@ -142,6 +568,8 @@ final class RefreshController {
     }
 }
 
+// ─── App Delegate ────────────────────────────────────────────────────────────
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let controller = RefreshController()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -149,10 +577,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let statusMenuItem = NSMenuItem(title: "Status: Idle", action: nil, keyEquivalent: "")
     private let lastRefreshMenuItem = NSMenuItem(title: "Last refresh: Never", action: nil, keyEquivalent: "")
+    private let syncStatusMenuItem = NSMenuItem(title: "Sync: Idle", action: nil, keyEquivalent: "")
+    private let lastSyncMenuItem = NSMenuItem(title: "Last sync: Never", action: nil, keyEquivalent: "")
     private let nextRefreshMenuItem = NSMenuItem(title: "Next refresh: Waiting for timer", action: nil, keyEquivalent: "")
     private let refreshNowMenuItem = NSMenuItem(title: "Refresh now", action: #selector(refreshNow), keyEquivalent: "r")
+    private let syncNowMenuItem = NSMenuItem(title: "Sync now", action: #selector(syncNow), keyEquivalent: "s")
     private let intervalMenuItem = NSMenuItem(title: "Refresh interval", action: nil, keyEquivalent: "")
     private let intervalSubmenu = NSMenu()
+
+    private lazy var settingsController = SettingsWindowController(
+        store: SettingsStore(scriptDir: controller.scriptDir)
+    )
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureStatusItem()
@@ -170,6 +605,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.refreshNow()
     }
 
+    @objc private func syncNow() {
+        controller.syncNow()
+    }
+
+    @objc private func openSettings() {
+        settingsController.show()
+    }
+
     @objc private func selectInterval(_ sender: NSMenuItem) {
         let availableIntervals = controller.allIntervals()
 
@@ -178,6 +621,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         controller.updateInterval(availableIntervals[sender.tag])
+    }
+
+    @objc private func openAccessibilitySettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
 
     @objc private func quit() {
@@ -196,14 +643,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureMenu() {
         statusMenuItem.isEnabled = false
         lastRefreshMenuItem.isEnabled = false
+        syncStatusMenuItem.isEnabled = false
+        lastSyncMenuItem.isEnabled = false
         nextRefreshMenuItem.isEnabled = false
 
         menu.addItem(statusMenuItem)
         menu.addItem(lastRefreshMenuItem)
+        menu.addItem(syncStatusMenuItem)
+        menu.addItem(lastSyncMenuItem)
         menu.addItem(nextRefreshMenuItem)
         menu.addItem(.separator())
         refreshNowMenuItem.target = self
         menu.addItem(refreshNowMenuItem)
+        syncNowMenuItem.target = self
+        menu.addItem(syncNowMenuItem)
 
         intervalMenuItem.submenu = intervalSubmenu
         menu.addItem(intervalMenuItem)
@@ -216,6 +669,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
+
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        let accessibilityItem = NSMenuItem(title: "Grant Accessibility Access...", action: #selector(openAccessibilitySettings), keyEquivalent: "")
+        accessibilityItem.target = self
+        menu.addItem(accessibilityItem)
 
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
@@ -235,13 +696,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lastRefreshMenuItem.title = "Last refresh: Never"
         }
 
+        syncStatusMenuItem.title = "Sync: \(controller.lastSyncResultText)"
+
+        if let lastSyncDate = controller.lastSyncDate {
+            lastSyncMenuItem.title = "Last sync: \(formatter.string(from: lastSyncDate))"
+        } else {
+            lastSyncMenuItem.title = "Last sync: Never"
+        }
+
         if let nextDate = controller.nextScheduledRefreshDate {
             nextRefreshMenuItem.title = "Next refresh: \(formatter.string(from: nextDate))"
         } else {
             nextRefreshMenuItem.title = "Next refresh: Not scheduled"
         }
 
-        refreshNowMenuItem.isEnabled = !controller.isRefreshing
+        refreshNowMenuItem.isEnabled = !controller.isBusy
+        syncNowMenuItem.isEnabled = !controller.isBusy
 
         for (index, item) in intervalSubmenu.items.enumerated() {
             item.state = controller.allIntervals()[index] == controller.selectedInterval ? .on : .off
@@ -272,6 +742,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return ("arrow.clockwise.circle", .secondaryLabelColor, "MoneyMoney refresh idle")
         case .refreshing:
             return ("arrow.triangle.2.circlepath.circle.fill", .systemBlue, "MoneyMoney refresh running")
+        case .syncing:
+            return ("arrow.triangle.2.circlepath.circle.fill", .systemOrange, "Syncing to Actual Budget")
         case .success:
             return ("checkmark.circle.fill", .systemGreen, "MoneyMoney refresh succeeded")
         case .failure:
@@ -282,6 +754,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
-app.setActivationPolicy(.prohibited)
+app.setActivationPolicy(.accessory)
 app.delegate = delegate
 app.run()

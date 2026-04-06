@@ -1,110 +1,223 @@
-# MoneyMoney Menu Bar Refresher
+# bank-refresh
 
-MoneyMoney Menu Bar Refresher is a small native macOS menu bar app that opens MoneyMoney and triggers `File > Refresh All Accounts` on a timer.
-
-Instead of relying on `launchd`, the app lives in the menu bar and manages its own schedule. You can refresh on demand, choose a timer interval, and see whether the last run succeeded without opening a terminal.
+A macOS menu bar app that automatically refreshes [MoneyMoney](https://moneymoney-app.com/) bank accounts, syncs new transactions to [Actual Budget](https://actualbudget.org/), and categorizes them using a local AI model via [Ollama](https://ollama.com/).
 
 ## What it does
 
-- Runs as a menu bar app with an icon-only tray item
-- Opens or activates MoneyMoney when a refresh starts
-- Triggers `Refresh All Accounts` through macOS UI scripting
-- Supports refresh intervals of `15 min`, `2 h`, `6 h`, and `12 h`
-- Shows the current status, the last refresh time, and the next scheduled refresh
-- Changes the tray icon for idle, running, success, and failure states
+```
+MoneyMoney (macOS banking app)
+  │
+  │  1. Refresh All Accounts (on timer or manual)
+  ▼
+Actual Budget (self-hosted budgeting server)
+  │
+  │  2. Import new transactions via actual-moneymoney
+  ▼
+Ollama (local LLM)
+  │
+  │  3. AI categorizes each transaction
+  ▼
+Done — transactions appear categorized in Actual Budget
+```
+
+The menu bar app manages the full pipeline automatically. You can also trigger each step individually.
+
+### Menu bar features
+
+- Refresh intervals: 15 min, 2 h, 6 h, 12 h
+- Manual "Refresh now" and "Sync now" buttons
+- Status icon changes color: idle (gray), refreshing (blue), syncing/categorizing (orange), success (green), failure (red)
+- Shows last refresh time, last sync time, next scheduled refresh
 
 ## Requirements
 
-- macOS
-- MoneyMoney installed
-- Accessibility permission for `/Applications/RefreshMoneyMoney.app`
-- MoneyMoney using English menu labels
-
-## Language limitation
-
-Right now, yes: this only works reliably when MoneyMoney is using English menu labels.
-
-The bundled AppleScript clicks these exact UI items:
-
-- `File`
-- `Refresh All Accounts`
-
-If MoneyMoney is localized to another language, the script will not find those menu entries and the refresh will fail. To support another language, update the menu titles in [`refresh-moneymoney.applescript`](./refresh-moneymoney.applescript).
+- macOS 13+
+- [MoneyMoney](https://moneymoney-app.com/) installed (English UI)
+- [Actual Budget](https://actualbudget.org/) server (self-hosted)
+- [Ollama](https://ollama.com/) running with a loaded model (default: `gemma4:26b`)
+- [mise](https://mise.jdx.dev/) (for Node.js version management)
+- Xcode Command Line Tools (`xcode-select --install`)
 
 ## Setup
 
-1. Clone the repository:
+### 1. Clone and install tools
 
 ```sh
 git clone git@github.com:nachtschatt3n/bank-refresh.git
 cd bank-refresh
+mise install        # installs Node.js 22
+npm install         # installs @actual-app/api
 ```
 
-2. Build the app:
+### 2. Configure credentials
+
+Copy the example environment file and fill in your values:
+
+```sh
+cp .env.example .env
+```
+
+Edit `.env`:
+
+```sh
+# Actual Budget — get these from your server
+ACTUAL_URL=https://actual.example.com
+ACTUAL_PASSWORD=your-server-password
+ACTUAL_SYNC_ID=from-actual-settings-advanced
+ACTUAL_ACCOUNT_ID=from-the-account-url
+
+# Ollama — where your LLM runs
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=gemma4:26b
+
+# Optional: custom DNS server for internal domains
+DNS_SERVER=
+```
+
+**Where to find the Actual Budget values:**
+
+- `ACTUAL_URL`: Your Actual Budget server URL
+- `ACTUAL_PASSWORD`: The password you use to log in
+- `ACTUAL_SYNC_ID`: Settings > Show advanced settings > Sync ID
+- `ACTUAL_ACCOUNT_ID`: Open the account in Actual Budget, copy the UUID from the URL
+
+### 3. Configure MoneyMoney sync
+
+Install the [actual-moneymoney](https://github.com/NikxDa/actual-moneymoney) CLI:
+
+```sh
+npm install -g actual-moneymoney
+```
+
+Run `actual-monmon validate` to generate the config file, then edit it (`~/.actually/config.toml`) with your Actual Budget server details and account mappings. See the [actual-moneymoney docs](https://github.com/NikxDa/actual-moneymoney#readme) for configuration details.
+
+Test the sync:
+
+```sh
+actual-monmon validate
+actual-monmon import --from=2024-01-01  # initial import
+```
+
+### 4. Build and install the app
 
 ```sh
 ./build-native-app.sh
-```
-
-3. Install it to `/Applications`:
-
-```sh
-mv ./RefreshMoneyMoney.app /Applications/RefreshMoneyMoney.app
-```
-
-4. Open macOS System Settings:
-   `System Settings > Privacy & Security > Accessibility`
-
-5. Add `/Applications/RefreshMoneyMoney.app` to the Accessibility list and enable it.
-
-6. If macOS shows a permission prompt the first time the app runs, allow it.
-
-7. Launch the app:
-
-```sh
+cp -R RefreshMoneyMoney.app /Applications/
 open /Applications/RefreshMoneyMoney.app
 ```
 
-## macOS security settings
+Grant Accessibility permission when prompted:
+`System Settings > Privacy & Security > Accessibility` — add and enable `RefreshMoneyMoney.app`.
 
-The app uses `System Events` to control the MoneyMoney UI, so macOS will block it unless Accessibility access is enabled.
+## AI Categorization
 
-If refreshes fail with an assistive access error:
+The categorizer uses a local Ollama model to classify transactions into budget categories. See [CATEGORIZE.md](./CATEGORIZE.md) for full details.
 
-1. Go to `System Settings > Privacy & Security > Accessibility`
-2. Remove `RefreshMoneyMoney` from the list if it is already there
-3. Add `/Applications/RefreshMoneyMoney.app` again
-4. Ensure the toggle is enabled
-5. Quit and reopen the app
+### Quick start
 
-Using `/Applications/RefreshMoneyMoney.app` as the stable install path is important because macOS privacy permissions are tied to the app identity and location.
+```sh
+# Let AI suggest categories based on your transaction data
+mise run categorize:suggest
 
-## How to use it
+# Categorize all uncategorized transactions + create rules
+mise run categorize
 
-- Click the menu bar icon
-- Choose `Refresh now` for an immediate refresh
-- Pick one of the built-in timer intervals
-- Check the menu for `Status`, `Last refresh`, and `Next refresh`
+# Monitor progress
+mise run categorize:status
+mise run categorize:log
 
-The timer runs only while the menu bar app is open.
+# Stop a running job
+mise run categorize:stop
+```
+
+Or use the shell script directly:
+
+```sh
+./run-categorize.sh suggest          # suggest categories
+./run-categorize.sh start --rules    # categorize + create rules
+./run-categorize.sh start --dry-run  # preview without changes
+./run-categorize.sh status           # check progress
+./run-categorize.sh stop             # stop running job
+```
+
+### How it works
+
+- Fetches uncategorized transactions from Actual Budget via `@actual-app/api`
+- Sends them in batches of 25 to Ollama (with `think: false` for speed)
+- Uses short IDs (`t1`, `c1`) in prompts to avoid UUID hallucination
+- Falls back to JSON schema constrained decoding if fast mode fails
+- Creates Actual Budget rules for recurring payees (3+ occurrences)
+- Idempotent: only processes transactions without a category
+
+### Performance
+
+With `gemma4:26b` and thinking disabled: ~4 seconds per batch of 25 transactions.
+
+## Usage
+
+### Menu bar
+
+Click the icon in the menu bar:
+
+- **Refresh now** (r) — refresh MoneyMoney + sync + categorize
+- **Sync now** (s) — sync to Actual Budget + categorize (skip bank refresh)
+- **Refresh interval** — choose auto-refresh schedule
+
+### mise tasks
+
+```sh
+mise run build                # build the macOS app
+mise run categorize           # run AI categorization
+mise run categorize:suggest   # suggest new categories
+mise run categorize:status    # show progress
+mise run categorize:log       # tail log
+mise run categorize:stop      # stop running job
+```
 
 ## Project layout
 
-- `refresh-moneymoney.applescript`: plain-text AppleScript used for the actual refresh
-- `native-wrapper/main.swift`: native menu bar app
-- `native-wrapper/Info.plist`: app metadata with bundle identifier
-- `build-native-app.sh`: build and ad-hoc signing script
-- `tests/smoke-test.sh`: bundle smoke test
+```
+native-wrapper/
+  main.swift                  # macOS menu bar app (Swift/AppKit)
+  Info.plist                  # app bundle metadata
+refresh-moneymoney.applescript # AppleScript for MoneyMoney UI automation
+categorize-transactions.mjs   # AI transaction categorizer (Node.js)
+run-categorize.sh             # categorizer wrapper (start/stop/status)
+build-native-app.sh           # build script
+.env.example                  # credential template
+.mise.toml                    # Node.js version + task definitions
+package.json                  # Node.js dependencies
+CATEGORIZE.md                 # detailed categorizer documentation
+tests/smoke-test.sh           # bundle smoke test
+```
+
+### Runtime files (gitignored)
+
+```
+.env                          # your credentials
+.categorizer/                 # logs, status, failed transactions
+node_modules/                 # npm dependencies
+RefreshMoneyMoney.app/        # built app bundle
+```
+
+## Language limitation
+
+The AppleScript clicks English menu items (`File` > `Refresh All Accounts`). For other languages, update [`refresh-moneymoney.applescript`](./refresh-moneymoney.applescript).
+
+## macOS security
+
+The app uses System Events to control MoneyMoney, requiring Accessibility permission. If refreshes fail:
+
+1. System Settings > Privacy & Security > Accessibility
+2. Remove and re-add `RefreshMoneyMoney.app`
+3. Enable the toggle
+4. Restart the app
 
 ## Test
 
 ```sh
 ./tests/smoke-test.sh
 ```
-
-## Notes
-
-- The repo intentionally tracks source files only; the built `.app` bundle is generated.
 
 ## License
 

@@ -26,5 +26,7 @@
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>This app needs to control MoneyMoney to refresh accounts.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>bank-refresh</string>
 </dict>
 </plist>

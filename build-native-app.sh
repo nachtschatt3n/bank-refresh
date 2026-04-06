@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 
-ROOT="/Users/mu/code/bank-refresh"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="RefreshMoneyMoney"
 APP_DIR="$ROOT/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"

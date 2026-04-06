@@ -1,0 +1,27 @@
+{
+  "name": "bank-refresh",
+  "version": "1.0.0",
+  "description": "MoneyMoney Menu Bar Refresher is a small native macOS menu bar app that opens MoneyMoney and triggers `File > Refresh All Accounts` on a timer.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nachtschatt3n/bank-refresh.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/nachtschatt3n/bank-refresh/issues"
+  },
+  "homepage": "https://github.com/nachtschatt3n/bank-refresh#readme",
+  "dependencies": {
+    "@actual-app/api": "^26.3.0"
+  }
+}

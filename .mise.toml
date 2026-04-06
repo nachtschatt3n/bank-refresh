@@ -1,0 +1,26 @@
+[tools]
+node = "22"
+
+[tasks.build]
+description = "Build the macOS menu bar app"
+run = "./build-native-app.sh"
+
+[tasks.categorize]
+description = "Run AI categorization on uncategorized transactions"
+run = "./run-categorize.sh start --rules"
+
+[tasks."categorize:suggest"]
+description = "Let AI suggest budget categories from transaction data"
+run = "./run-categorize.sh suggest"
+
+[tasks."categorize:status"]
+description = "Show categorization progress"
+run = "./run-categorize.sh status"
+
+[tasks."categorize:log"]
+description = "Tail the categorization log"
+run = "./run-categorize.sh log"
+
+[tasks."categorize:stop"]
+description = "Stop a running categorization"
+run = "./run-categorize.sh stop"
