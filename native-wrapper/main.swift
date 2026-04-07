@@ -1,4 +1,5 @@
 import AppKit
+import Network
 
 struct RefreshInterval: Equatable {
     let title: String
@@ -275,6 +276,9 @@ final class RefreshController {
     private(set) var lastSyncDate: Date?
     private(set) var lastResultText = "Idle"
     private(set) var lastSyncResultText = "Idle"
+    private(set) var lastDurationSeconds: TimeInterval = 0
+    private(set) var lastSuccessDate: Date?
+    private var refreshStartTime: Date?
 
     var onStatusChange: (() -> Void)?
 
@@ -309,6 +313,16 @@ final class RefreshController {
         }
 
         return .idle
+    }
+
+    var visualStateName: String {
+        switch visualState {
+        case .idle: return "idle"
+        case .refreshing: return "refreshing"
+        case .syncing: return "syncing"
+        case .success: return "success"
+        case .failure: return "failure"
+        }
     }
 
     func start() {
@@ -351,6 +365,7 @@ final class RefreshController {
     }
 
     private func doRefreshSyncCategorize() {
+        refreshStartTime = Date()
         let refreshResult = runAppleScript()
 
         DispatchQueue.main.sync {
@@ -398,6 +413,12 @@ final class RefreshController {
             isBusy = false
             lastSyncDate = Date()
             lastSyncResultText = catResult
+            if let start = refreshStartTime {
+                lastDurationSeconds = Date().timeIntervalSince(start)
+            }
+            if catResult == "Success" {
+                lastSuccessDate = Date()
+            }
             onStatusChange?()
         }
     }
@@ -568,10 +589,110 @@ final class RefreshController {
     }
 }
 
+// ─── Metrics Server ─────────────────────────────────────────────────────────
+
+final class MetricsServer {
+    private var listener: NWListener?
+    private let port: UInt16
+    private let controller: RefreshController
+
+    init(port: UInt16, controller: RefreshController) {
+        self.port = port
+        self.controller = controller
+    }
+
+    func start() {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
+        let params = NWParameters.tcp
+        guard let listener = try? NWListener(using: params, on: nwPort) else { return }
+        self.listener = listener
+
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.handleConnection(connection)
+        }
+        listener.start(queue: .global(qos: .utility))
+    }
+
+    func stop() {
+        listener?.cancel()
+    }
+
+    private func handleConnection(_ connection: NWConnection) {
+        connection.start(queue: .global(qos: .utility))
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, _, _ in
+            guard let self, let data, let request = String(data: data, encoding: .utf8) else {
+                connection.cancel()
+                return
+            }
+
+            let response: String
+            if request.contains("GET /health") {
+                response = self.httpResponse(status: "200 OK", contentType: "text/plain", body: "ok\n")
+            } else if request.contains("GET /metrics") {
+                let body = self.formatMetrics()
+                response = self.httpResponse(status: "200 OK", contentType: "text/plain; version=0.0.4; charset=utf-8", body: body)
+            } else {
+                response = self.httpResponse(status: "404 Not Found", contentType: "text/plain", body: "not found\n")
+            }
+
+            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+        }
+    }
+
+    private func httpResponse(status: String, contentType: String, body: String) -> String {
+        "HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+    }
+
+    private func formatMetrics() -> String {
+        var lastSuccess: TimeInterval = 0
+        var lastRefresh: TimeInterval = 0
+        var duration: TimeInterval = 0
+        var stateName = "idle"
+
+        DispatchQueue.main.sync {
+            lastSuccess = self.controller.lastSuccessDate?.timeIntervalSince1970 ?? 0
+            lastRefresh = self.controller.lastRefreshDate?.timeIntervalSince1970 ?? 0
+            duration = self.controller.lastDurationSeconds
+            stateName = self.controller.visualStateName
+        }
+
+        var lines: [String] = []
+
+        lines.append("# HELP bank_refresh_up Whether the bank-refresh app is running.")
+        lines.append("# TYPE bank_refresh_up gauge")
+        lines.append("bank_refresh_up 1")
+
+        lines.append("# HELP bank_refresh_last_success_timestamp_seconds Unix timestamp of last successful refresh.")
+        lines.append("# TYPE bank_refresh_last_success_timestamp_seconds gauge")
+        lines.append("bank_refresh_last_success_timestamp_seconds \(Int(lastSuccess))")
+
+        lines.append("# HELP bank_refresh_last_refresh_timestamp_seconds Unix timestamp of last refresh attempt.")
+        lines.append("# TYPE bank_refresh_last_refresh_timestamp_seconds gauge")
+        lines.append("bank_refresh_last_refresh_timestamp_seconds \(Int(lastRefresh))")
+
+        lines.append("# HELP bank_refresh_duration_seconds Duration of last refresh cycle.")
+        lines.append("# TYPE bank_refresh_duration_seconds gauge")
+        lines.append("bank_refresh_duration_seconds \(String(format: "%.3f", duration))")
+
+        lines.append("# HELP bank_refresh_state Current state of the refresh controller.")
+        lines.append("# TYPE bank_refresh_state gauge")
+        for state in ["idle", "refreshing", "syncing", "success", "failure"] {
+            let val = state == stateName ? 1 : 0
+            lines.append("bank_refresh_state{state=\"\(state)\"} \(val)")
+        }
+
+        lines.append("")
+        return lines.joined(separator: "\n")
+    }
+}
+
 // ─── App Delegate ────────────────────────────────────────────────────────────
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let controller = RefreshController()
+    private var metricsServer: MetricsServer?
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
 
@@ -599,6 +720,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         controller.start()
         updateMenu()
+
+        metricsServer = MetricsServer(port: 9100, controller: controller)
+        metricsServer?.start()
     }
 
     @objc private func refreshNow() {

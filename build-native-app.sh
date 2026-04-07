@@ -19,6 +19,7 @@ cp "$ROOT/refresh-moneymoney.applescript" "$RESOURCES_DIR/refresh-moneymoney.app
 xcrun swiftc \
 	-target arm64-apple-macos13.0 \
 	-framework AppKit \
+	-framework Network \
 	-module-cache-path "$MODULE_CACHE_DIR" \
 	-o "$MACOS_DIR/$APP_NAME" \
 	"$ROOT/native-wrapper/main.swift"
