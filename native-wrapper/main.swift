@@ -27,6 +27,7 @@ final class SettingsStore {
         var ollamaURL: String
         var ollamaModel: String
         var dnsServer: String
+        var metricsPort: String
     }
 
     init(scriptDir: String) {
@@ -36,7 +37,8 @@ final class SettingsStore {
     func load() -> EnvConfig {
         var config = EnvConfig(
             actualURL: "", actualPassword: "", actualSyncId: "", actualAccountId: "",
-            ollamaURL: "http://localhost:11434", ollamaModel: "gemma4:26b", dnsServer: ""
+            ollamaURL: "http://localhost:11434", ollamaModel: "gemma4:26b", dnsServer: "",
+            metricsPort: "9100"
         )
 
         guard let contents = try? String(contentsOfFile: envFilePath, encoding: .utf8) else {
@@ -57,6 +59,7 @@ final class SettingsStore {
             case "OLLAMA_URL": config.ollamaURL = val
             case "OLLAMA_MODEL": config.ollamaModel = val
             case "DNS_SERVER": config.dnsServer = val
+            case "METRICS_PORT": config.metricsPort = val
             default: break
             }
         }
@@ -72,6 +75,7 @@ final class SettingsStore {
             "OLLAMA_URL=\(config.ollamaURL)",
             "OLLAMA_MODEL=\(config.ollamaModel)",
             "DNS_SERVER=\(config.dnsServer)",
+            "METRICS_PORT=\(config.metricsPort)",
         ]
         try? lines.joined(separator: "\n").appending("\n").write(toFile: envFilePath, atomically: true, encoding: .utf8)
     }
@@ -89,6 +93,7 @@ final class SettingsWindowController {
     private let ollamaURLField = NSTextField()
     private let ollamaModelField = NSTextField()
     private let dnsServerField = NSTextField()
+    private let metricsPortField = NSTextField()
     private let statusLabel = NSTextField(labelWithString: "")
 
     init(store: SettingsStore) {
@@ -103,7 +108,7 @@ final class SettingsWindowController {
         }
 
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -116,7 +121,7 @@ final class SettingsWindowController {
         content.autoresizingMask = [.width, .height]
         w.contentView = content
 
-        var y: CGFloat = 385
+        var y: CGFloat = 425
 
         func addSection(_ title: String) {
             let label = NSTextField(labelWithString: title)
@@ -155,6 +160,7 @@ final class SettingsWindowController {
         y -= 10
         addSection("Advanced")
         addRow("DNS Server", field: dnsServerField)
+        addRow("Metrics Port", field: metricsPortField)
 
         y -= 15
         statusLabel.frame = NSRect(x: 20, y: y, width: 300, height: 20)
@@ -182,6 +188,7 @@ final class SettingsWindowController {
         ollamaURLField.stringValue = config.ollamaURL
         ollamaModelField.stringValue = config.ollamaModel
         dnsServerField.stringValue = config.dnsServer
+        metricsPortField.stringValue = config.metricsPort
 
         self.window = w
         w.makeKeyAndOrderFront(nil)
@@ -196,7 +203,8 @@ final class SettingsWindowController {
             actualAccountId: actualAccountIdField.stringValue,
             ollamaURL: ollamaURLField.stringValue,
             ollamaModel: ollamaModelField.stringValue,
-            dnsServer: dnsServerField.stringValue
+            dnsServer: dnsServerField.stringValue,
+            metricsPort: metricsPortField.stringValue
         )
         store.save(config)
         statusLabel.stringValue = "Saved"
@@ -721,7 +729,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.start()
         updateMenu()
 
-        metricsServer = MetricsServer(port: 9100, controller: controller)
+        let config = SettingsStore(scriptDir: controller.scriptDir).load()
+        let metricsPort = UInt16(config.metricsPort) ?? 9100
+        metricsServer = MetricsServer(port: metricsPort, controller: controller)
         metricsServer?.start()
     }
 
