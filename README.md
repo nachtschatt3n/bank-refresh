@@ -98,6 +98,30 @@ actual-monmon validate
 actual-monmon import --from=2024-01-01  # initial import
 ```
 
+### 3b. Configure Sure sync (optional)
+
+To also mirror transactions into a [Sure](https://github.com/we-promise/sure) instance, install the sibling CLI:
+
+```sh
+npm install -g /path/to/sure-moneymoney   # or: npm install -g sure-moneymoney once published
+```
+
+One-time Sure setup:
+
+1. In Sure UI → **Accounts**: create one account per MoneyMoney account, matching the name exactly, with the same currency and starting balance.
+2. In Sure UI → **Settings → API Keys**: generate a key with `read_write` scope.
+3. Run `sure-monmon validate` and enter the URL + API key. It will auto-map accounts by name and write `~/.sure/config.toml`.
+
+Test the sync:
+
+```sh
+sure-monmon validate
+sure-monmon import --dry-run   # preview
+sure-monmon import             # live
+```
+
+The menu-bar app invokes `sure-monmon import` automatically after each Actual sync. Sure failures are isolated — they never block Actual sync or categorization. If `sure-monmon` is not installed the stage is skipped.
+
 ### 4. Build and install the app
 
 ```sh

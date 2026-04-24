@@ -279,11 +279,12 @@ final class RefreshController {
 
     private var timer: Timer?
     private(set) var isBusy = false
-    private(set) var currentPhase = "Idle" // "Refreshing...", "Syncing...", "Categorizing..."
+    private(set) var currentPhase = "Idle" // "Refreshing...", "Syncing...", "Syncing to Sure...", "Categorizing..."
     private(set) var lastRefreshDate: Date?
     private(set) var lastSyncDate: Date?
     private(set) var lastResultText = "Idle"
     private(set) var lastSyncResultText = "Idle"
+    private(set) var lastSureSyncResultText = "Idle"
     private(set) var lastDurationSeconds: TimeInterval = 0
     private(set) var lastSuccessDate: Date?
     private var refreshStartTime: Date?
@@ -407,6 +408,19 @@ final class RefreshController {
                 onStatusChange?()
             }
             return
+        }
+
+        DispatchQueue.main.sync {
+            currentPhase = "Syncing to Sure..."
+            lastSureSyncResultText = "Syncing..."
+            onStatusChange?()
+        }
+
+        let sureResult = runSureSync()
+
+        DispatchQueue.main.sync {
+            lastSureSyncResultText = sureResult
+            onStatusChange?()
         }
 
         DispatchQueue.main.sync {
@@ -541,6 +555,41 @@ final class RefreshController {
         } catch {
             swiftLog("runSync error: \(error.localizedDescription)")
             return "Sync failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func runSureSync() -> String {
+        swiftLog("runSureSync start")
+        let sureBin = "\(nodeBinDir)/sure-monmon"
+        guard FileManager.default.isExecutableFile(atPath: sureBin) else {
+            swiftLog("runSureSync skipped: sure-monmon not installed at \(sureBin)")
+            return "Not installed"
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: sureBin)
+        process.arguments = ["import"]
+        process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "\(nodeBinDir):\(env["PATH"] ?? "/usr/bin:/bin")"
+        process.environment = env
+
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            swiftLog("runSureSync exit=\(process.terminationStatus)")
+            switch process.terminationStatus {
+            case 0: return "Success"
+            case 2: return "Not configured — run sure-monmon validate"
+            default: return "Sure sync failed (exit \(process.terminationStatus))"
+            }
+        } catch {
+            swiftLog("runSureSync error: \(error.localizedDescription)")
+            return "Sure sync failed: \(error.localizedDescription)"
         }
     }
 
@@ -707,6 +756,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusMenuItem = NSMenuItem(title: "Status: Idle", action: nil, keyEquivalent: "")
     private let lastRefreshMenuItem = NSMenuItem(title: "Last refresh: Never", action: nil, keyEquivalent: "")
     private let syncStatusMenuItem = NSMenuItem(title: "Sync: Idle", action: nil, keyEquivalent: "")
+    private let sureStatusMenuItem = NSMenuItem(title: "Sure: Idle", action: nil, keyEquivalent: "")
     private let lastSyncMenuItem = NSMenuItem(title: "Last sync: Never", action: nil, keyEquivalent: "")
     private let nextRefreshMenuItem = NSMenuItem(title: "Next refresh: Waiting for timer", action: nil, keyEquivalent: "")
     private let refreshNowMenuItem = NSMenuItem(title: "Refresh now", action: #selector(refreshNow), keyEquivalent: "r")
@@ -778,12 +828,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusMenuItem.isEnabled = false
         lastRefreshMenuItem.isEnabled = false
         syncStatusMenuItem.isEnabled = false
+        sureStatusMenuItem.isEnabled = false
         lastSyncMenuItem.isEnabled = false
         nextRefreshMenuItem.isEnabled = false
 
         menu.addItem(statusMenuItem)
         menu.addItem(lastRefreshMenuItem)
         menu.addItem(syncStatusMenuItem)
+        menu.addItem(sureStatusMenuItem)
         menu.addItem(lastSyncMenuItem)
         menu.addItem(nextRefreshMenuItem)
         menu.addItem(.separator())
@@ -831,6 +883,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         syncStatusMenuItem.title = "Sync: \(controller.lastSyncResultText)"
+        sureStatusMenuItem.title = "Sure: \(controller.lastSureSyncResultText)"
 
         if let lastSyncDate = controller.lastSyncDate {
             lastSyncMenuItem.title = "Last sync: \(formatter.string(from: lastSyncDate))"
