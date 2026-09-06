@@ -224,6 +224,54 @@ node_modules/                 # npm dependencies
 RefreshMoneyMoney.app/        # built app bundle
 ```
 
+## Metrics endpoint
+
+The app serves Prometheus metrics on `METRICS_PORT` (default `9100`):
+
+| Path | Purpose |
+|---|---|
+| `/metrics` | Prometheus exposition — five gauges (see below) |
+| `/health` | plain `ok` liveness probe |
+
+Exported gauges: `bank_refresh_up`, `bank_refresh_last_success_timestamp_seconds`,
+`bank_refresh_last_refresh_timestamp_seconds`, `bank_refresh_duration_seconds`, and
+`bank_refresh_state{state="idle|refreshing|syncing|success|failure"}`.
+
+### The listener binds all interfaces, unauthenticated — deliberately
+
+This is a documented choice, not an oversight:
+
+- **It must be remotely reachable.** A Prometheus instance on another host scrapes
+  it across the LAN. Binding to loopback would silently break that scrape target,
+  which is worse than the exposure — the alerting would go quiet rather than fire.
+- **The payload carries nothing sensitive.** Five gauges: timestamps, a duration,
+  and a state enum. No credentials, no account identifiers, no balances, no
+  transaction data. Anything sensitive stays in `.env` and `.categorizer/`, both
+  gitignored.
+- **The surface is small.** `GET /metrics` and `GET /health` only; every other
+  request gets 404/405. There are no shell invocations anywhere in the app
+  (`Process` is always given an argument array), so there is no injection path.
+
+Run it only on a trusted network segment. If you need it locked down further, put
+it behind a firewall rule scoped to your Prometheus host rather than changing the
+bind address.
+
+### Refresh-failure handling
+
+Sync stages retry with backoff before reporting failure, so a transient backend
+outage (a Kubernetes node roll, an ingress restart) does not latch a failure state
+that lasts until the next refresh cycle:
+
+- **Actual Budget sync** — 6 attempts over 275s. Its failure latches the exported
+  `failure` state, so it is worth waiting out a backend that is coming back.
+- **Sure sync** — 4 attempts over 65s. This stage is isolated by design (a Sure
+  failure does not stop the Actual sync or categorization, and does not reach the
+  exported state), so it retries only long enough to cover an ingress restart.
+- **Config errors are never retried** — `sure-monmon` exit 2 ("not configured")
+  fails immediately rather than after a minute of pointless waiting.
+
+Failing stages log their exit code and stderr to `.categorizer/swift-debug.log`.
+
 ## Language limitation
 
 The AppleScript clicks English menu items (`File` > `Refresh All Accounts`). For other languages, update [`refresh-moneymoney.applescript`](./refresh-moneymoney.applescript).

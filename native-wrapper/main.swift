@@ -265,6 +265,44 @@ final class SettingsWindowController {
     }
 }
 
+// ─── Metrics Snapshot ────────────────────────────────────────────────────────
+
+/// Thread-safe copy of the controller state that the metrics server serves.
+///
+/// The scrape path MUST NOT touch the main queue. Prometheus scrapes /metrics
+/// every 60s from the cluster; when formatMetrics() blocked on
+/// `DispatchQueue.main.sync`, any main-thread stall (a modal menu, a slow
+/// redraw, a spinning UI) would stall the scrape, drop `bank_refresh_up` to 0
+/// and fire BankRefreshDown for a perfectly healthy app. That couples "the UI
+/// is busy" to "monitoring says the app is down" — a false-signal class worth
+/// designing out rather than tuning around.
+///
+/// The controller writes this on every state change; the metrics server reads
+/// it under the same lock. Neither side ever waits on the other's queue.
+final class MetricsSnapshot {
+    struct Value {
+        var lastSuccess: TimeInterval = 0
+        var lastRefresh: TimeInterval = 0
+        var duration: TimeInterval = 0
+        var stateName: String = "idle"
+    }
+
+    private let lock = NSLock()
+    private var value = Value()
+
+    func update(_ newValue: Value) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = newValue
+    }
+
+    func read() -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 // ─── Refresh Controller ──────────────────────────────────────────────────────
 
 final class RefreshController {
@@ -276,6 +314,9 @@ final class RefreshController {
         RefreshInterval(title: "6 h", seconds: 6 * 60 * 60),
         RefreshInterval(title: "12 h", seconds: 12 * 60 * 60),
     ]
+
+    /// Read by MetricsServer on the scrape queue — never via the main queue.
+    let metricsSnapshot = MetricsSnapshot()
 
     private var timer: Timer?
     private(set) var isBusy = false
@@ -290,6 +331,19 @@ final class RefreshController {
     private var refreshStartTime: Date?
 
     var onStatusChange: (() -> Void)?
+
+    /// Single funnel for state changes: refresh the metrics snapshot, then tell
+    /// the UI. Anything that mutates observable state must go through here, or
+    /// the exported metrics silently drift from reality.
+    private func notifyStatusChanged() {
+        metricsSnapshot.update(MetricsSnapshot.Value(
+            lastSuccess: lastSuccessDate?.timeIntervalSince1970 ?? 0,
+            lastRefresh: lastRefreshDate?.timeIntervalSince1970 ?? 0,
+            duration: lastDurationSeconds,
+            stateName: visualStateName
+        ))
+        onStatusChange?()
+    }
 
     var selectedInterval: RefreshInterval {
         let storedValue = defaults.double(forKey: intervalKey)
@@ -336,13 +390,13 @@ final class RefreshController {
 
     func start() {
         scheduleTimer()
-        onStatusChange?()
+        notifyStatusChanged()
     }
 
     func updateInterval(_ interval: RefreshInterval) {
         defaults.set(interval.seconds, forKey: intervalKey)
         scheduleTimer()
-        onStatusChange?()
+        notifyStatusChanged()
     }
 
     func refreshNow() {
@@ -351,7 +405,7 @@ final class RefreshController {
         isBusy = true
         currentPhase = "Refreshing..."
         lastResultText = "Refreshing..."
-        onStatusChange?()
+        notifyStatusChanged()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -365,7 +419,7 @@ final class RefreshController {
         isBusy = true
         currentPhase = "Syncing..."
         lastSyncResultText = "Syncing..."
-        onStatusChange?()
+        notifyStatusChanged()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -380,11 +434,11 @@ final class RefreshController {
         DispatchQueue.main.sync {
             lastRefreshDate = Date()
             lastResultText = refreshResult
-            onStatusChange?()
+            notifyStatusChanged()
         }
 
         guard refreshResult == "Success" else {
-            DispatchQueue.main.sync { isBusy = false; onStatusChange?() }
+            DispatchQueue.main.sync { isBusy = false; notifyStatusChanged() }
             return
         }
 
@@ -395,7 +449,7 @@ final class RefreshController {
         DispatchQueue.main.sync {
             currentPhase = "Syncing..."
             lastSyncResultText = "Syncing..."
-            onStatusChange?()
+            notifyStatusChanged()
         }
 
         let syncResult = runSync()
@@ -405,7 +459,7 @@ final class RefreshController {
                 isBusy = false
                 lastSyncDate = Date()
                 lastSyncResultText = syncResult
-                onStatusChange?()
+                notifyStatusChanged()
             }
             return
         }
@@ -413,20 +467,20 @@ final class RefreshController {
         DispatchQueue.main.sync {
             currentPhase = "Syncing to Sure..."
             lastSureSyncResultText = "Syncing..."
-            onStatusChange?()
+            notifyStatusChanged()
         }
 
         let sureResult = runSureSync()
 
         DispatchQueue.main.sync {
             lastSureSyncResultText = sureResult
-            onStatusChange?()
+            notifyStatusChanged()
         }
 
         DispatchQueue.main.sync {
             currentPhase = "Categorizing..."
             lastSyncResultText = "Categorizing..."
-            onStatusChange?()
+            notifyStatusChanged()
         }
 
         let catResult = runCategorize()
@@ -441,7 +495,7 @@ final class RefreshController {
             if catResult == "Success" {
                 lastSuccessDate = Date()
             }
-            onStatusChange?()
+            notifyStatusChanged()
         }
     }
 
@@ -549,9 +603,18 @@ final class RefreshController {
     // mirrors what categorize-transactions.mjs already does for its own Actual
     // Budget connect ("Connecting to Actual Budget (attempt 1/5)").
     private enum RetryPolicy {
-        /// Delay before each retry. The sum (275s) comfortably exceeds the
-        /// 3m10s backend gap measured during a full three-node roll.
-        static let backoff: [TimeInterval] = [5, 15, 45, 90, 120]
+        /// For a stage whose failure LATCHES the exported failure state, and so
+        /// pages. Sum (275s) comfortably exceeds the 3m10s backend gap measured
+        /// during a full three-node roll. Worth spending to avoid a false page.
+        static let latching: [TimeInterval] = [5, 15, 45, 90, 120]
+
+        /// For a stage that is ISOLATED by design. runSureSync's result is not
+        /// read by visualState, so a Sure failure never reaches the metrics or
+        /// the alert — it only costs data freshness until the next 2h cycle.
+        /// Spending 275s per cycle to chase a persistently-down Sure would add
+        /// ~4.5 min to every cycle for no signal. 65s still rides out the ~85s
+        /// ingress convergence that caused the common case.
+        static let isolated: [TimeInterval] = [5, 15, 45]
     }
 
     private struct StageResult {
@@ -605,16 +668,17 @@ final class RefreshController {
         label: String,
         binary: String,
         arguments: [String],
+        backoff: [TimeInterval],
         isRetryable: (Int32) -> Bool
     ) -> StageResult {
         var attempt = 0
         while true {
             let result = runStageOnce(label: label, binary: binary, arguments: arguments, attempt: attempt)
             if result.status == 0 { return result }
-            guard isRetryable(result.status), attempt < RetryPolicy.backoff.count else { return result }
-            let delay = RetryPolicy.backoff[attempt]
+            guard isRetryable(result.status), attempt < backoff.count else { return result }
+            let delay = backoff[attempt]
             swiftLog("\(label) exit=\(result.status) treated as transient — retrying in \(Int(delay))s "
-                + "(attempt \(attempt + 2)/\(RetryPolicy.backoff.count + 1))")
+                + "(attempt \(attempt + 2)/\(backoff.count + 1))")
             Thread.sleep(forTimeInterval: delay)
             attempt += 1
         }
@@ -632,6 +696,7 @@ final class RefreshController {
             label: "runSync",
             binary: "\(nodeBinDir)/actual-monmon",
             arguments: ["import"],
+            backoff: RetryPolicy.latching,
             // actual-monmon has no dedicated exit code for "backend unreachable",
             // so every non-zero exit is retried. A genuinely broken config fails
             // all 6 attempts and is still surfaced.
@@ -657,6 +722,8 @@ final class RefreshController {
             label: "runSureSync",
             binary: sureBin,
             arguments: ["import"],
+            // Isolated stage: short backoff on purpose (see RetryPolicy.isolated).
+            backoff: RetryPolicy.isolated,
             // exit 2 is "not configured" — a config error, never transient.
             // Retrying it would just delay a report the operator needs now.
             isRetryable: { $0 != 0 && $0 != 2 }
@@ -728,13 +795,22 @@ final class RefreshController {
 // ─── Metrics Server ─────────────────────────────────────────────────────────
 
 final class MetricsServer {
+    /// A client that opens a socket and never completes a request must not pin
+    /// that connection forever. Without this, connections leak one per probe.
+    private static let requestTimeout: TimeInterval = 10
+    /// Cap on request-header bytes so a client streaming junk cannot grow the
+    /// read buffer without bound.
+    private static let maxRequestBytes = 16 * 1024
+
     private var listener: NWListener?
     private let port: UInt16
-    private let controller: RefreshController
+    private let snapshot: MetricsSnapshot
 
-    init(port: UInt16, controller: RefreshController) {
+    /// Takes the snapshot, NOT the controller — the scrape path then *cannot*
+    /// reach main-thread-owned state, even by a later accident.
+    init(port: UInt16, snapshot: MetricsSnapshot) {
         self.port = port
-        self.controller = controller
+        self.snapshot = snapshot
     }
 
     func start() {
@@ -755,26 +831,90 @@ final class MetricsServer {
 
     private func handleConnection(_ connection: NWConnection) {
         connection.start(queue: .global(qos: .utility))
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, _, _ in
-            guard let self, let data, let request = String(data: data, encoding: .utf8) else {
+
+        let timeout = DispatchWorkItem { connection.cancel() }
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + Self.requestTimeout, execute: timeout)
+
+        receiveRequest(on: connection, accumulated: Data(), timeout: timeout)
+    }
+
+    /// An HTTP request can arrive split across TCP segments, so read until the
+    /// end of the header block instead of assuming a single `receive` got all
+    /// of it. The previous single-shot read 404'd on a segmented request.
+    private func receiveRequest(on connection: NWConnection, accumulated: Data, timeout: DispatchWorkItem) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, isComplete, error in
+            guard let self else {
+                timeout.cancel()
                 connection.cancel()
                 return
             }
 
-            let response: String
-            if request.contains("GET /health") {
-                response = self.httpResponse(status: "200 OK", contentType: "text/plain", body: "ok\n")
-            } else if request.contains("GET /metrics") {
-                let body = self.formatMetrics()
-                response = self.httpResponse(status: "200 OK", contentType: "text/plain; version=0.0.4; charset=utf-8", body: body)
-            } else {
-                response = self.httpResponse(status: "404 Not Found", contentType: "text/plain", body: "not found\n")
+            if error != nil {
+                timeout.cancel()
+                connection.cancel()
+                return
             }
 
-            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
+            var buffer = accumulated
+            if let data { buffer.append(data) }
+
+            // We serve GET only, so the headers are the whole request.
+            if let headerEnd = buffer.range(of: Data("\r\n\r\n".utf8)) {
+                timeout.cancel()
+                self.respond(to: String(decoding: buffer[..<headerEnd.lowerBound], as: UTF8.self), on: connection)
+                return
+            }
+
+            if buffer.count > Self.maxRequestBytes {
+                timeout.cancel()
+                self.send(self.httpResponse(status: "431 Request Header Fields Too Large",
+                                            contentType: "text/plain", body: "too large\n"),
+                          on: connection)
+                return
+            }
+
+            if isComplete {
+                timeout.cancel()
                 connection.cancel()
-            })
+                return
+            }
+
+            self.receiveRequest(on: connection, accumulated: buffer, timeout: timeout)
         }
+    }
+
+    private func respond(to head: String, on connection: NWConnection) {
+        // Parse the request LINE. The old `request.contains("GET /metrics")`
+        // matched that string anywhere, including inside a header value.
+        let requestLine = head.components(separatedBy: "\r\n").first ?? ""
+        let parts = requestLine.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        let method = parts.first ?? ""
+        let target = parts.count > 1 ? parts[1] : ""
+        let path = target.components(separatedBy: "?").first ?? target
+
+        let response: String
+        switch (method, path) {
+        case ("GET", "/health"):
+            response = httpResponse(status: "200 OK", contentType: "text/plain", body: "ok\n")
+        case ("GET", "/metrics"):
+            response = httpResponse(status: "200 OK",
+                                    contentType: "text/plain; version=0.0.4; charset=utf-8",
+                                    body: formatMetrics())
+        case ("GET", _):
+            response = httpResponse(status: "404 Not Found", contentType: "text/plain", body: "not found\n")
+        default:
+            response = httpResponse(status: "405 Method Not Allowed",
+                                    contentType: "text/plain", body: "method not allowed\n")
+        }
+
+        send(response, on: connection)
+    }
+
+    private func send(_ response: String, on connection: NWConnection) {
+        connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
+            connection.cancel()
+        })
     }
 
     private func httpResponse(status: String, contentType: String, body: String) -> String {
@@ -782,17 +922,9 @@ final class MetricsServer {
     }
 
     private func formatMetrics() -> String {
-        var lastSuccess: TimeInterval = 0
-        var lastRefresh: TimeInterval = 0
-        var duration: TimeInterval = 0
-        var stateName = "idle"
-
-        DispatchQueue.main.sync {
-            lastSuccess = self.controller.lastSuccessDate?.timeIntervalSince1970 ?? 0
-            lastRefresh = self.controller.lastRefreshDate?.timeIntervalSince1970 ?? 0
-            duration = self.controller.lastDurationSeconds
-            stateName = self.controller.visualStateName
-        }
+        // Lock-protected snapshot read. Never touches the main queue, so a
+        // stalled UI can no longer make monitoring report the app as down.
+        let current = snapshot.read()
 
         var lines: [String] = []
 
@@ -802,20 +934,20 @@ final class MetricsServer {
 
         lines.append("# HELP bank_refresh_last_success_timestamp_seconds Unix timestamp of last successful refresh.")
         lines.append("# TYPE bank_refresh_last_success_timestamp_seconds gauge")
-        lines.append("bank_refresh_last_success_timestamp_seconds \(Int(lastSuccess))")
+        lines.append("bank_refresh_last_success_timestamp_seconds \(Int(current.lastSuccess))")
 
         lines.append("# HELP bank_refresh_last_refresh_timestamp_seconds Unix timestamp of last refresh attempt.")
         lines.append("# TYPE bank_refresh_last_refresh_timestamp_seconds gauge")
-        lines.append("bank_refresh_last_refresh_timestamp_seconds \(Int(lastRefresh))")
+        lines.append("bank_refresh_last_refresh_timestamp_seconds \(Int(current.lastRefresh))")
 
         lines.append("# HELP bank_refresh_duration_seconds Duration of last refresh cycle.")
         lines.append("# TYPE bank_refresh_duration_seconds gauge")
-        lines.append("bank_refresh_duration_seconds \(String(format: "%.3f", duration))")
+        lines.append("bank_refresh_duration_seconds \(String(format: "%.3f", current.duration))")
 
         lines.append("# HELP bank_refresh_state Current state of the refresh controller.")
         lines.append("# TYPE bank_refresh_state gauge")
         for state in ["idle", "refreshing", "syncing", "success", "failure"] {
-            let val = state == stateName ? 1 : 0
+            let val = state == current.stateName ? 1 : 0
             lines.append("bank_refresh_state{state=\"\(state)\"} \(val)")
         }
 
@@ -860,7 +992,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let config = SettingsStore(scriptDir: controller.scriptDir).load()
         let metricsPort = UInt16(config.metricsPort) ?? 9100
-        metricsServer = MetricsServer(port: metricsPort, controller: controller)
+        metricsServer = MetricsServer(port: metricsPort, snapshot: controller.metricsSnapshot)
         metricsServer?.start()
     }
 
