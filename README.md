@@ -233,9 +233,33 @@ The app serves Prometheus metrics on `METRICS_PORT` (default `9100`):
 | `/metrics` | Prometheus exposition — five gauges (see below) |
 | `/health` | plain `ok` liveness probe |
 
-Exported gauges: `bank_refresh_up`, `bank_refresh_last_success_timestamp_seconds`,
-`bank_refresh_last_refresh_timestamp_seconds`, `bank_refresh_duration_seconds`, and
-`bank_refresh_state{state="idle|refreshing|syncing|success|failure"}`.
+Exported gauges:
+
+| Metric | Meaning |
+|---|---|
+| `bank_refresh_up` | always `1` while the app is running |
+| `bank_refresh_last_success_timestamp_seconds` | last fully successful cycle (`0` until one completes) |
+| `bank_refresh_last_refresh_timestamp_seconds` | last refresh attempt |
+| `bank_refresh_duration_seconds` | duration of the last cycle |
+| `bank_refresh_state{state="idle\|refreshing\|syncing\|success\|failure"}` | pipeline state, one-hot |
+| `bank_refresh_sure_sync_state{state="unknown\|syncing\|ok\|failed\|not_configured\|not_installed"}` | Sure sync stage, one-hot |
+| `bank_refresh_sure_sync_last_success_timestamp_seconds` | last successful Sure sync (`0` until one completes) |
+
+The Sure sync stage is **isolated by design**: a Sure failure does not stop the
+Actual Budget sync or categorization, and deliberately does not appear in
+`bank_refresh_state`. It therefore gets its own state set, so that isolated does
+not also mean invisible. The two steady states are modelled separately from a
+real fault:
+
+- `not_installed` — `sure-monmon` is not present. Expected if you skipped the
+  optional Sure setup; not an incident.
+- `not_configured` — `sure-monmon` exits 2. Needs a one-off `sure-monmon
+  validate`; not an incident.
+- `failed` — retried and still broken. This is the one worth alerting on.
+- `unknown` — has not run yet this session (e.g. just after a restart).
+
+Both timestamp gauges start at `0`, so any staleness rule must guard with
+`> 0` or it will fire against a freshly restarted app.
 
 ### The listener binds all interfaces, unauthenticated — deliberately
 

@@ -6,6 +6,24 @@ struct RefreshInterval: Equatable {
     let seconds: TimeInterval
 }
 
+/// Outcome of the Sure sync stage.
+///
+/// A dedicated type rather than prefix-matching `lastSureSyncResultText`: the
+/// UI string is presentation, and visualState already shows what happens when
+/// control flow depends on it. These names are exported as metric label values,
+/// so they are API — do not rename them without updating any alert rule.
+enum SureSyncState: String {
+    case unknown          // never run this session (e.g. just after a restart)
+    case syncing
+    case ok
+    case failed           // real failure: retried and still broken
+    case notConfigured    = "not_configured"   // sure-monmon exit 2 — steady state
+    case notInstalled     = "not_installed"    // binary absent — steady state
+
+    static let allCases: [SureSyncState] =
+        [.unknown, .syncing, .ok, .failed, .notConfigured, .notInstalled]
+}
+
 enum RefreshVisualState {
     case idle
     case refreshing
@@ -285,6 +303,8 @@ final class MetricsSnapshot {
         var lastRefresh: TimeInterval = 0
         var duration: TimeInterval = 0
         var stateName: String = "idle"
+        var sureStateName: String = SureSyncState.unknown.rawValue
+        var sureLastSuccess: TimeInterval = 0
     }
 
     private let lock = NSLock()
@@ -326,6 +346,8 @@ final class RefreshController {
     private(set) var lastResultText = "Idle"
     private(set) var lastSyncResultText = "Idle"
     private(set) var lastSureSyncResultText = "Idle"
+    private(set) var sureSyncState: SureSyncState = .unknown
+    private(set) var lastSureSyncSuccessDate: Date?
     private(set) var lastDurationSeconds: TimeInterval = 0
     private(set) var lastSuccessDate: Date?
     private var refreshStartTime: Date?
@@ -340,7 +362,9 @@ final class RefreshController {
             lastSuccess: lastSuccessDate?.timeIntervalSince1970 ?? 0,
             lastRefresh: lastRefreshDate?.timeIntervalSince1970 ?? 0,
             duration: lastDurationSeconds,
-            stateName: visualStateName
+            stateName: visualStateName,
+            sureStateName: sureSyncState.rawValue,
+            sureLastSuccess: lastSureSyncSuccessDate?.timeIntervalSince1970 ?? 0
         ))
         onStatusChange?()
     }
@@ -467,13 +491,16 @@ final class RefreshController {
         DispatchQueue.main.sync {
             currentPhase = "Syncing to Sure..."
             lastSureSyncResultText = "Syncing..."
+            sureSyncState = .syncing
             notifyStatusChanged()
         }
 
         let sureResult = runSureSync()
 
         DispatchQueue.main.sync {
-            lastSureSyncResultText = sureResult
+            lastSureSyncResultText = sureResult.text
+            sureSyncState = sureResult.state
+            if sureResult.state == .ok { lastSureSyncSuccessDate = Date() }
             notifyStatusChanged()
         }
 
@@ -710,12 +737,12 @@ final class RefreshController {
             : "Sync failed (exit \(result.status)): \(firstLine(result.stderr))"
     }
 
-    private func runSureSync() -> String {
+    private func runSureSync() -> (text: String, state: SureSyncState) {
         swiftLog("runSureSync start")
         let sureBin = "\(nodeBinDir)/sure-monmon"
         guard FileManager.default.isExecutableFile(atPath: sureBin) else {
             swiftLog("runSureSync skipped: sure-monmon not installed at \(sureBin)")
-            return "Not installed"
+            return ("Not installed", .notInstalled)
         }
 
         let result = runStage(
@@ -730,13 +757,14 @@ final class RefreshController {
         )
 
         switch result.status {
-        case 0: return "Success"
-        case 2: return "Not configured — run sure-monmon validate"
+        case 0: return ("Success", .ok)
+        case 2: return ("Not configured — run sure-monmon validate", .notConfigured)
         default:
             // NOTE: the "Sure sync failed" prefix is load-bearing for the UI.
-            return result.stderr.isEmpty
+            let text = result.stderr.isEmpty
                 ? "Sure sync failed (exit \(result.status))"
                 : "Sure sync failed (exit \(result.status)): \(firstLine(result.stderr))"
+            return (text, .failed)
         }
     }
     private func runCategorize() -> String {
@@ -950,6 +978,22 @@ final class MetricsServer {
             let val = state == current.stateName ? 1 : 0
             lines.append("bank_refresh_state{state=\"\(state)\"} \(val)")
         }
+
+        // Sure sync is ISOLATED by design (62e7e0a): its failure must not fail the
+        // pipeline or block the Actual sync / categorization, and so it is absent
+        // from bank_refresh_state. Isolated must not mean invisible, hence its own
+        // state set. Steady states (not_configured / not_installed) are modelled
+        // distinctly from failed so an alert can ignore them.
+        lines.append("# HELP bank_refresh_sure_sync_state Current state of the Sure sync stage.")
+        lines.append("# TYPE bank_refresh_sure_sync_state gauge")
+        for state in SureSyncState.allCases {
+            let val = state.rawValue == current.sureStateName ? 1 : 0
+            lines.append("bank_refresh_sure_sync_state{state=\"\(state.rawValue)\"} \(val)")
+        }
+
+        lines.append("# HELP bank_refresh_sure_sync_last_success_timestamp_seconds Unix timestamp of last successful Sure sync.")
+        lines.append("# TYPE bank_refresh_sure_sync_last_success_timestamp_seconds gauge")
+        lines.append("bank_refresh_sure_sync_last_success_timestamp_seconds \(Int(current.sureLastSuccess))")
 
         lines.append("")
         return lines.joined(separator: "\n")
