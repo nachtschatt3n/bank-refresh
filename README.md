@@ -309,6 +309,23 @@ The app uses System Events to control MoneyMoney, requiring Accessibility permis
 3. Enable the toggle
 4. Restart the app
 
+> **Rebuilding the app revokes this permission.** The bundle is ad-hoc signed
+> (no Team ID), so its code identity changes on every `./build-native-app.sh`.
+> macOS then treats the replacement as a different app and the Accessibility
+> grant no longer applies. The only symptom is `runAppleScript` failing, which
+> latches the exported `failure` state and fires `BankRefreshFailing`.
+>
+> **Re-approve after every install.** The app logs its status on startup, so
+> check before waiting for a cycle:
+>
+> ```sh
+> grep "permissions:" .categorizer/swift-debug.log | tail -2
+> ```
+>
+> `Accessibility (AXIsProcessTrusted) = DENIED` means step 1-4 above are needed.
+> AppleScript failures also log the error number and a plain-language hint
+> (`-1743` Automation denied, `-1728` menu item not found, `-1712` timeout).
+
 ## Test
 
 ```sh

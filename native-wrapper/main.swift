@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Network
 
 struct RefreshInterval: Equatable {
@@ -413,6 +414,8 @@ final class RefreshController {
     }
 
     func start() {
+        swiftLog("app start — build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?")")
+        logPermissionDiagnostics()
         scheduleTimer()
         notifyStatusChanged()
     }
@@ -452,6 +455,7 @@ final class RefreshController {
     }
 
     private func doRefreshSyncCategorize() {
+        swiftLog("=== cycle start ===")
         refreshStartTime = Date()
         let refreshResult = runAppleScript()
 
@@ -536,24 +540,97 @@ final class RefreshController {
     }
 
     private func runAppleScript() -> String {
+        swiftLog("runAppleScript start")
+
         guard let scriptURL = Bundle.main.url(forResource: "refresh-moneymoney", withExtension: "applescript") else {
-            return "Missing bundled AppleScript"
+            // NOTE: this previously returned "Missing bundled AppleScript", which
+            // has no "Failed:" prefix, so visualState fell through to .idle — a
+            // broken bundle reported itself as healthy.
+            swiftLog("runAppleScript FAILED: bundled AppleScript resource missing")
+            return "Failed: bundled AppleScript missing"
         }
 
         do {
             let source = try String(contentsOf: scriptURL, encoding: .utf8)
             var errorInfo: NSDictionary?
             let script = NSAppleScript(source: source)
+            let started = Date()
             script?.executeAndReturnError(&errorInfo)
+            let elapsed = Date().timeIntervalSince(started)
 
             if let errorInfo {
+                // Log the WHOLE error, not just describe()'s message+number. The
+                // errorNumber is what separates a TCC denial from a missing menu
+                // item from a timeout, and discarding it is why this stage could
+                // not say why it failed.
+                let number = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
+                let message = errorInfo[NSAppleScript.errorMessage] as? String ?? ""
+                let brief = errorInfo[NSAppleScript.errorBriefMessage] as? String ?? ""
+                let appName = errorInfo[NSAppleScript.errorAppName] as? String ?? ""
+                swiftLog("runAppleScript FAILED after \(String(format: "%.1f", elapsed))s "
+                    + "errorNumber=\(number) app=\(appName) brief=\(brief) message=\(message)")
+                swiftLog("runAppleScript hint: \(Self.appleScriptHint(for: number))")
+                logPermissionDiagnostics()
                 return "Failed: \(describe(errorInfo))"
             }
 
+            swiftLog("runAppleScript OK in \(String(format: "%.1f", elapsed))s")
             return "Success"
         } catch {
+            swiftLog("runAppleScript FAILED to read script: \(error.localizedDescription)")
             return "Failed: \(error.localizedDescription)"
         }
+    }
+
+    /// Plain-language meaning of the common AppleScript/Apple Event errors this
+    /// pipeline can hit, so the log says what to DO rather than just a number.
+    private static func appleScriptHint(for number: Int) -> String {
+        switch number {
+        case -1743:
+            return "TCC Automation DENIED. The app is ad-hoc signed, so replacing the bundle revokes it. "
+                + "Fix: System Settings > Privacy & Security > Automation > RefreshMoneyMoney, re-enable MoneyMoney + System Events."
+        case -1744:
+            return "TCC consent not yet given — macOS wants to prompt. Trigger one refresh manually and approve the dialog."
+        case -600:
+            return "Target application not running."
+        case -1728:
+            return "Object not found: the menu item/menu/process did not resolve. Causes: MoneyMoney UI not in English, "
+                + "a modal dialog (password/TAN) covering the menu, or Accessibility permission missing so the process tree is invisible."
+        case -1719:
+            return "Index out of range (e.g. 'menu bar 1' absent) — usually Accessibility permission missing."
+        case -1712:
+            return "Apple event timed out — MoneyMoney was busy or blocked on a dialog."
+        case -25211:
+            return "Accessibility API disabled for this app. Fix: System Settings > Privacy & Security > Accessibility."
+        case -10004:
+            return "Privilege violation sending the Apple event."
+        case 0:
+            return "no error number reported"
+        default:
+            return "unmapped AppleScript error \(number)"
+        }
+    }
+
+    /// Reports the macOS privacy (TCC) status for everything the refresh script
+    /// touches, WITHOUT sending an Apple event and WITHOUT prompting:
+    /// `AXIsProcessTrusted()` and `AEDeterminePermissionToAutomateTarget(...,
+    /// askUserIfNeeded: false)` are pure status reads, so this is safe to run
+    /// unattended and can never raise a dialog on the operator's desktop.
+    ///
+    /// This matters because the app is ad-hoc signed (no Team ID): TCC keys on
+    /// the code identity, so rebuilding and replacing the bundle silently
+    /// revokes these grants.
+    ///
+    /// Deliberately only `AXIsProcessTrusted()`, which is a pure, immediate,
+    /// non-prompting status read. An earlier version also probed Apple Event
+    /// (Automation) permission via AEDeterminePermissionToAutomateTarget with
+    /// askUserIfNeeded:false — that does not prompt, but it BLOCKS
+    /// indefinitely, and calling it from start() hung the app before the
+    /// metrics server existed. The Automation cases are reported by the
+    /// -1743/-1744 hints above when they actually occur, which costs nothing
+    /// and cannot hang.
+    func logPermissionDiagnostics() {
+        swiftLog("permissions: Accessibility (AXIsProcessTrusted) = \(AXIsProcessTrusted() ? "GRANTED" : "DENIED")")
     }
 
     private lazy var nodeBinDir: String = {
@@ -1031,13 +1108,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateMenu()
         }
 
-        controller.start()
-        updateMenu()
-
+        // Start the exporter BEFORE the controller. Monitoring must not be
+        // hostage to anything in controller startup: when a startup probe once
+        // blocked here, controller.start() never returned, the metrics server
+        // was never created, and a healthy-but-stalled app went dark to
+        // Prometheus instead of reporting its state.
         let config = SettingsStore(scriptDir: controller.scriptDir).load()
         let metricsPort = UInt16(config.metricsPort) ?? 9100
         metricsServer = MetricsServer(port: metricsPort, snapshot: controller.metricsSnapshot)
         metricsServer?.start()
+
+        controller.start()
+        updateMenu()
     }
 
     @objc private func refreshNow() {
