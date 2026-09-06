@@ -529,11 +529,45 @@ final class RefreshController {
         }
     }
 
-    private func runSync() -> String {
-        swiftLog("runSync start, nodeBinDir=\(nodeBinDir), scriptDir=\(scriptDir)")
+    // ─── Transient-failure handling ──────────────────────────────────────────
+    //
+    // The sync stages below shell out to processes that talk to cluster-hosted
+    // backends (Actual Budget and Sure, both behind the `internal` ingress).
+    // A planned Kubernetes node roll takes those away for minutes at a time:
+    // during the 2026-09-06 Talos roll the internal ingress controller was
+    // rescheduled and had not published its ingress status for ~85s, and the
+    // actual-budget Service had no active endpoint for a further 3m10s.
+    //
+    // A single-shot child process that lands in one of those windows exits
+    // non-zero, which latches `visualState` to .failure until the next 2h tick
+    // — that is exactly what tripped the BankRefreshFailing alert, ~1h45m of
+    // "failure" for one unlucky second of scheduling.
+    //
+    // Fix: retry across a window wider than a node roll. This does NOT paper
+    // over a real outage — a genuine provider/credential failure fails on every
+    // attempt and is still reported, just ~4.5 min later than before. This
+    // mirrors what categorize-transactions.mjs already does for its own Actual
+    // Budget connect ("Connecting to Actual Budget (attempt 1/5)").
+    private enum RetryPolicy {
+        /// Delay before each retry. The sum (275s) comfortably exceeds the
+        /// 3m10s backend gap measured during a full three-node roll.
+        static let backoff: [TimeInterval] = [5, 15, 45, 90, 120]
+    }
+
+    private struct StageResult {
+        let status: Int32
+        let stderr: String
+    }
+
+    /// Runs `binary args` once, capturing stderr so a failure is diagnosable.
+    private func runStageOnce(label: String, binary: String, arguments: [String], attempt: Int) -> StageResult {
+        let errPath = NSTemporaryDirectory() + "bank-refresh-\(label)-\(UUID().uuidString).err"
+        FileManager.default.createFile(atPath: errPath, contents: nil)
+        defer { try? FileManager.default.removeItem(atPath: errPath) }
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "\(nodeBinDir)/actual-monmon")
-        process.arguments = ["import"]
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = arguments
         process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
 
         var env = ProcessInfo.processInfo.environment
@@ -541,21 +575,74 @@ final class RefreshController {
         process.environment = env
 
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        // stderr goes to a FILE, not a Pipe: waitUntilExit() with an undrained
+        // Pipe deadlocks as soon as the child fills the 64K buffer.
+        if let handle = FileHandle(forWritingAtPath: errPath) {
+            process.standardError = handle
+        } else {
+            process.standardError = FileHandle.nullDevice
+        }
 
         do {
             try process.run()
             process.waitUntilExit()
-            swiftLog("runSync exit=\(process.terminationStatus)")
-            if process.terminationStatus == 0 {
-                return "Success"
-            } else {
-                return "Sync failed (exit \(process.terminationStatus))"
-            }
         } catch {
-            swiftLog("runSync error: \(error.localizedDescription)")
-            return "Sync failed: \(error.localizedDescription)"
+            swiftLog("\(label) attempt \(attempt + 1) failed to launch: \(error.localizedDescription)")
+            return StageResult(status: -1, stderr: error.localizedDescription)
         }
+
+        var tail = (try? String(contentsOfFile: errPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if tail.count > 500 { tail = String(tail.suffix(500)) }
+
+        let status = process.terminationStatus
+        swiftLog("\(label) attempt \(attempt + 1) exit=\(status)" + (tail.isEmpty ? "" : " stderr=\(tail)"))
+        return StageResult(status: status, stderr: tail)
+    }
+
+    /// Runs a stage, retrying while `isRetryable(exitCode)` holds.
+    private func runStage(
+        label: String,
+        binary: String,
+        arguments: [String],
+        isRetryable: (Int32) -> Bool
+    ) -> StageResult {
+        var attempt = 0
+        while true {
+            let result = runStageOnce(label: label, binary: binary, arguments: arguments, attempt: attempt)
+            if result.status == 0 { return result }
+            guard isRetryable(result.status), attempt < RetryPolicy.backoff.count else { return result }
+            let delay = RetryPolicy.backoff[attempt]
+            swiftLog("\(label) exit=\(result.status) treated as transient — retrying in \(Int(delay))s "
+                + "(attempt \(attempt + 2)/\(RetryPolicy.backoff.count + 1))")
+            Thread.sleep(forTimeInterval: delay)
+            attempt += 1
+        }
+    }
+
+    /// First line of a stderr blob, clipped for the menu bar.
+    private func firstLine(_ text: String) -> String {
+        guard let line = text.split(separator: "\n").first.map(String.init) else { return "" }
+        return line.count > 120 ? String(line.prefix(120)) + "…" : line
+    }
+
+    private func runSync() -> String {
+        swiftLog("runSync start, nodeBinDir=\(nodeBinDir), scriptDir=\(scriptDir)")
+        let result = runStage(
+            label: "runSync",
+            binary: "\(nodeBinDir)/actual-monmon",
+            arguments: ["import"],
+            // actual-monmon has no dedicated exit code for "backend unreachable",
+            // so every non-zero exit is retried. A genuinely broken config fails
+            // all 6 attempts and is still surfaced.
+            isRetryable: { $0 != 0 }
+        )
+
+        guard result.status != 0 else { return "Success" }
+        // NOTE: the "Sync failed" prefix is load-bearing — visualState matches on it.
+        return result.stderr.isEmpty
+            ? "Sync failed (exit \(result.status))"
+            : "Sync failed (exit \(result.status)): \(firstLine(result.stderr))"
     }
 
     private func runSureSync() -> String {
@@ -566,33 +653,25 @@ final class RefreshController {
             return "Not installed"
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: sureBin)
-        process.arguments = ["import"]
-        process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+        let result = runStage(
+            label: "runSureSync",
+            binary: sureBin,
+            arguments: ["import"],
+            // exit 2 is "not configured" — a config error, never transient.
+            // Retrying it would just delay a report the operator needs now.
+            isRetryable: { $0 != 0 && $0 != 2 }
+        )
 
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "\(nodeBinDir):\(env["PATH"] ?? "/usr/bin:/bin")"
-        process.environment = env
-
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            swiftLog("runSureSync exit=\(process.terminationStatus)")
-            switch process.terminationStatus {
-            case 0: return "Success"
-            case 2: return "Not configured — run sure-monmon validate"
-            default: return "Sure sync failed (exit \(process.terminationStatus))"
-            }
-        } catch {
-            swiftLog("runSureSync error: \(error.localizedDescription)")
-            return "Sure sync failed: \(error.localizedDescription)"
+        switch result.status {
+        case 0: return "Success"
+        case 2: return "Not configured — run sure-monmon validate"
+        default:
+            // NOTE: the "Sure sync failed" prefix is load-bearing for the UI.
+            return result.stderr.isEmpty
+                ? "Sure sync failed (exit \(result.status))"
+                : "Sure sync failed (exit \(result.status)): \(firstLine(result.stderr))"
         }
     }
-
     private func runCategorize() -> String {
         swiftLog("runCategorize start")
         let process = Process()
