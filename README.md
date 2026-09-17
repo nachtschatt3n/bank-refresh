@@ -34,7 +34,7 @@ The menu bar app manages the full pipeline automatically. You can also trigger e
 - macOS 13+
 - [MoneyMoney](https://moneymoney-app.com/) installed (English UI)
 - [Actual Budget](https://actualbudget.org/) server (self-hosted)
-- [Ollama](https://ollama.com/) running with a loaded model (default: `gemma4:26b`)
+- [Ollama](https://ollama.com/) running with a loaded model (default: `gemma4:26b-mlx`)
 - [mise](https://mise.jdx.dev/) (for Node.js version management)
 - Xcode Command Line Tools (`xcode-select --install`)
 
@@ -68,7 +68,7 @@ ACTUAL_ACCOUNT_ID=from-the-account-url
 
 # Ollama — where your LLM runs
 OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=gemma4:26b
+OLLAMA_MODEL=gemma4:26b-mlx
 
 # Optional: custom DNS server for internal domains
 DNS_SERVER=
@@ -175,7 +175,7 @@ Or use the shell script directly:
 
 ### Performance
 
-With `gemma4:26b` and thinking disabled: ~4 seconds per batch of 25 transactions.
+With thinking disabled: ~4 seconds per batch of 25 transactions.
 
 ## Usage
 

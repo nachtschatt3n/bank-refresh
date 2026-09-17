@@ -1,12 +1,12 @@
 # AI Transaction Categorizer
 
-Categorizes uncategorized transactions in Actual Budget using a local Ollama LLM (gemma4:26b).
+Categorizes uncategorized transactions in Actual Budget using a local Ollama LLM (gemma4:26b-mlx).
 
 ## How it works
 
 1. Connects to Actual Budget at `your-actual-server` via `@actual-app/api`
 2. Fetches all uncategorized transactions
-3. Sends them in batches of 25 to Ollama (gemma4:26b with thinking disabled)
+3. Sends them in batches of 25 to Ollama (gemma4:26b-mlx with thinking disabled)
 4. Updates each transaction with the AI-assigned category
 5. Optionally creates Actual Budget rules for recurring payees
 
@@ -14,8 +14,13 @@ Categorizes uncategorized transactions in Actual Budget using a local Ollama LLM
 
 - Node.js via mise (`mise exec node -- node --version`)
 - `@actual-app/api` installed (`npm install` in this directory)
-- Ollama running on the Mac Mini with `gemma4:26b` loaded (`ollama serve` (or your Ollama launch script))
+- Ollama running on the Mac Mini with `gemma4:26b-mlx` loaded (`ollama serve` (or your Ollama launch script))
 - Actual Budget reachable at `your-actual-server`
+
+> Use the **`-mlx`** build, not the GGUF `gemma4:26b`. The mini keeps an all-MLX set
+> resident; the GGUF reserves 27.1 GiB on load, which does not fit alongside it in
+> 48 GB. Requesting it makes Ollama OOM and evict *every* model, taking unrelated
+> apps down with it. Merchant recognition is character-identical between the two.
 
 ## Usage
 
@@ -66,7 +71,7 @@ All config is at the top of `categorize-transactions.mjs`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `model` | `gemma4:26b` | Ollama model (must be pre-loaded) |
+| `model` | `gemma4:26b-mlx` | Ollama model (must be pre-loaded) |
 | `batchSize` | 25 | Transactions per LLM call |
 | `syncEveryNBatches` | 50 | How often to sync to Actual Budget server |
 | `ollamaTimeoutMs` | 120,000 | Max time per Ollama request |
@@ -75,7 +80,7 @@ All config is at the top of `categorize-transactions.mjs`:
 
 ## Performance
 
-With `gemma4:26b` and `think: false`:
+With `think: false`:
 - ~2-5 seconds per batch of 25 transactions
 - ~14,000 transactions in ~1 hour
 - Idempotent: only processes transactions with no category set
@@ -86,7 +91,7 @@ With `gemma4:26b` and `think: false`:
 
 **"Actual Budget not reachable"** — Check pod: `kubectl get pods -n office | grep actual`
 
-**"Ollama timeout"** — Model may be swapped out. Check `curl http://your-ollama-host:11434/api/ps` to see if gemma4:26b is loaded.
+**"Ollama timeout"** — Model may be swapped out. Check `curl http://your-ollama-host:11434/api/ps` to see if gemma4:26b-mlx is resident.
 
 **Batches failing with "no JSON"** — The LLM occasionally returns malformed output. These batches are skipped and logged. Rerun the script to pick them up (only uncategorized transactions are processed).
 
