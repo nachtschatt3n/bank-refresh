@@ -100,6 +100,7 @@ function log(level, msg) {
 }
 
 function logInfo(msg) { log('INFO', msg); }
+function logWarn(msg) { log('WARN', msg); }
 function logError(msg) { log('ERROR', msg); }
 function logDebug(msg) { log('DEBUG', msg); }
 
@@ -156,22 +157,32 @@ Last error:   ${s.lastError || 'none'}${failedInfo}
 
 // ─── Health checks ───────────────────────────────────────────────────────────
 
-async function checkOllama() {
+function getJSON(url, timeoutMs = 5000) {
   return new Promise((resolve) => {
-    const req = http.get(`${CONFIG.ollamaURL}/api/tags`, { timeout: 5000 }, (res) => {
+    const req = http.get(url, { timeout: timeoutMs }, (res) => {
       let body = '';
       res.on('data', c => body += c);
       res.on('end', () => {
-        try {
-          const data = JSON.parse(body);
-          const model = data.models?.find(m => m.name === CONFIG.model);
-          resolve({ ok: true, modelLoaded: !!model });
-        } catch { resolve({ ok: true, modelLoaded: false }); }
+        try { resolve(JSON.parse(body)); } catch { resolve(null); }
       });
     });
-    req.on('error', () => resolve({ ok: false, modelLoaded: false }));
-    req.on('timeout', () => { req.destroy(); resolve({ ok: false, modelLoaded: false }); });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
   });
+}
+
+// /api/tags lists what is *installed*; /api/ps lists what is *resident* in memory.
+// Only the latter means "no model load on first call" — keep them apart so the
+// pre-flight line cannot claim a cold model is ready to go.
+async function checkOllama() {
+  const tags = await getJSON(`${CONFIG.ollamaURL}/api/tags`);
+  if (!tags) return { ok: false, installed: false, resident: false };
+
+  const installed = !!tags.models?.some(m => m.name === CONFIG.model);
+  const ps = await getJSON(`${CONFIG.ollamaURL}/api/ps`);
+  const resident = !!ps?.models?.some(m => m.name === CONFIG.model);
+
+  return { ok: true, installed, resident };
 }
 
 async function checkActualBudget() {
@@ -622,10 +633,12 @@ async function main() {
     logError(`Ollama not reachable at ${CONFIG.ollamaURL}`);
     process.exit(1);
   }
-  if (!ollama.modelLoaded) {
-    logInfo(`Model ${CONFIG.model} not in ps — it will load on first call (may be slow)`);
+  if (!ollama.installed) {
+    logWarn(`Model ${CONFIG.model} is not installed on ${CONFIG.ollamaURL} — check OLLAMA_MODEL; calls will likely fail`);
+  } else if (!ollama.resident) {
+    logInfo(`Ollama OK, model ${CONFIG.model} installed but not resident — it will load on first call (may be slow)`);
   } else {
-    logInfo(`Ollama OK, model ${CONFIG.model} loaded`);
+    logInfo(`Ollama OK, model ${CONFIG.model} resident — no load needed`);
   }
 
   logDebug(`CWD: ${process.cwd()}, scriptDir: ${SCRIPT_DIR}`);
