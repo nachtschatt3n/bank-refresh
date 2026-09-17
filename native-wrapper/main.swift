@@ -56,7 +56,7 @@ final class SettingsStore {
     func load() -> EnvConfig {
         var config = EnvConfig(
             actualURL: "", actualPassword: "", actualSyncId: "", actualAccountId: "",
-            ollamaURL: "http://localhost:11434", ollamaModel: "gemma4:26b", dnsServer: "",
+            ollamaURL: "http://localhost:11434", ollamaModel: "gemma4:26b-mlx", dnsServer: "",
             metricsPort: "9100"
         )
 

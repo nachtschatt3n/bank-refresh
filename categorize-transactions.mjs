@@ -52,7 +52,7 @@ const CONFIG = {
   syncId: process.env.ACTUAL_SYNC_ID,
   accountId: process.env.ACTUAL_ACCOUNT_ID,
   ollamaURL: process.env.OLLAMA_URL || 'http://localhost:11434',
-  model: process.env.OLLAMA_MODEL || 'gemma4:26b',
+  model: process.env.OLLAMA_MODEL || 'gemma4:26b-mlx',
   batchSize: 25,
   syncEveryNBatches: 50,
   ollamaTimeoutMs: 120_000,
