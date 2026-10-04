@@ -165,14 +165,7 @@ final class SettingsWindowController {
             y -= 30
         }
 
-        addSection("Actual Budget")
-        addRow("Server URL", field: actualURLField)
-        addRow("Password", field: actualPasswordField, secure: true)
-        addRow("Sync ID", field: actualSyncIdField)
-        addRow("Account ID", field: actualAccountIdField)
-
-        y -= 10
-        addSection("Ollama (AI Categorizer)")
+        addSection("Ollama")
         addRow("Ollama URL", field: ollamaURLField)
         addRow("Model", field: ollamaModelField)
 
@@ -241,12 +234,8 @@ final class SettingsWindowController {
             let ollamaOk = Self.httpGet("\(ollamaURLField.stringValue)/api/tags", timeout: 5)
             results.append(ollamaOk ? "Ollama: OK" : "Ollama: unreachable")
 
-            // Test Actual Budget (via curl for DNS)
-            let abOk = Self.curlTest(actualURLField.stringValue + "/info")
-            results.append(abOk ? "Actual Budget: OK" : "Actual Budget: unreachable")
-
             DispatchQueue.main.async {
-                let allOk = ollamaOk && abOk
+                let allOk = ollamaOk
                 self.statusLabel.stringValue = results.joined(separator: "  |  ")
                 self.statusLabel.textColor = allOk ? .systemGreen : .systemOrange
             }
@@ -341,11 +330,10 @@ final class RefreshController {
 
     private var timer: Timer?
     private(set) var isBusy = false
-    private(set) var currentPhase = "Idle" // "Refreshing...", "Syncing...", "Syncing to Sure...", "Categorizing..."
+    private(set) var currentPhase = "Idle" // "Refreshing...", "Syncing to Sure..."
     private(set) var lastRefreshDate: Date?
     private(set) var lastSyncDate: Date?
     private(set) var lastResultText = "Idle"
-    private(set) var lastSyncResultText = "Idle"
     private(set) var lastSureSyncResultText = "Idle"
     private(set) var sureSyncState: SureSyncState = .unknown
     private(set) var lastSureSyncSuccessDate: Date?
@@ -392,11 +380,21 @@ final class RefreshController {
             return .syncing
         }
 
-        if lastResultText == "Success" && !lastSyncResultText.hasPrefix("Sync failed") && !lastSyncResultText.hasPrefix("Categorize failed") {
+        // Since 2026-10-04 the pipeline is MoneyMoney refresh -> Sure sync.
+        // The Actual Budget import and the Actual-only AI categorizer were
+        // removed when Actual Budget was decommissioned (cluster ac7bf0e0):
+        // with no server left, the import exited 1 every cycle, latched this
+        // state to .failure and — because it ran first — starved Sure of data.
+        //
+        // Sure sync stays ISOLATED from this state, exactly as before: it has
+        // its own state set + alerts (bank_refresh_sure_sync_state,
+        // BankRefreshSureSync{Failing,Stale}). Folding it in here would page
+        // twice for one Sure outage.
+        if lastResultText == "Success" {
             return .success
         }
 
-        if lastResultText.hasPrefix("Failed:") || lastSyncResultText.hasPrefix("Sync failed") || lastSyncResultText.hasPrefix("Categorize failed") {
+        if lastResultText.hasPrefix("Failed:") {
             return .failure
         }
 
@@ -436,7 +434,7 @@ final class RefreshController {
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            self.doRefreshSyncCategorize()
+            self.doRefreshAndSync()
         }
     }
 
@@ -444,17 +442,16 @@ final class RefreshController {
         guard !isBusy else { return }
 
         isBusy = true
-        currentPhase = "Syncing..."
-        lastSyncResultText = "Syncing..."
+        currentPhase = "Syncing to Sure..."
         notifyStatusChanged()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            self.doSyncCategorize()
+            self.doSureSync(completesRefresh: false)
         }
     }
 
-    private func doRefreshSyncCategorize() {
+    private func doRefreshAndSync() {
         swiftLog("=== cycle start ===")
         refreshStartTime = Date()
         let refreshResult = runAppleScript()
@@ -470,28 +467,13 @@ final class RefreshController {
             return
         }
 
-        doSyncCategorize()
+        doSureSync(completesRefresh: true)
     }
 
-    private func doSyncCategorize() {
-        DispatchQueue.main.sync {
-            currentPhase = "Syncing..."
-            lastSyncResultText = "Syncing..."
-            notifyStatusChanged()
-        }
-
-        let syncResult = runSync()
-
-        guard syncResult == "Success" else {
-            DispatchQueue.main.sync {
-                isBusy = false
-                lastSyncDate = Date()
-                lastSyncResultText = syncResult
-                notifyStatusChanged()
-            }
-            return
-        }
-
+    /// `completesRefresh` is true when this runs as the tail of a refresh cycle:
+    /// only then does the cycle count toward bank_refresh_last_success /
+    /// duration. A manual "Sync to Sure now" did not refresh any bank data.
+    private func doSureSync(completesRefresh: Bool) {
         DispatchQueue.main.sync {
             currentPhase = "Syncing to Sure..."
             lastSureSyncResultText = "Syncing..."
@@ -502,30 +484,20 @@ final class RefreshController {
         let sureResult = runSureSync()
 
         DispatchQueue.main.sync {
+            isBusy = false
+            lastSyncDate = Date()
             lastSureSyncResultText = sureResult.text
             sureSyncState = sureResult.state
             if sureResult.state == .ok { lastSureSyncSuccessDate = Date() }
-            notifyStatusChanged()
-        }
-
-        DispatchQueue.main.sync {
-            currentPhase = "Categorizing..."
-            lastSyncResultText = "Categorizing..."
-            notifyStatusChanged()
-        }
-
-        let catResult = runCategorize()
-
-        DispatchQueue.main.sync {
-            isBusy = false
-            lastSyncDate = Date()
-            lastSyncResultText = catResult
-            if let start = refreshStartTime {
-                lastDurationSeconds = Date().timeIntervalSince(start)
-            }
-            if catResult == "Success" {
+            if completesRefresh {
+                if let start = refreshStartTime {
+                    lastDurationSeconds = Date().timeIntervalSince(start)
+                }
                 lastSuccessDate = Date()
             }
+            swiftLog(completesRefresh
+                ? "=== cycle end === refresh=\(lastResultText) sure=\(sureResult.state.rawValue)"
+                : "=== manual Sure sync end === sure=\(sureResult.state.rawValue)")
             notifyStatusChanged()
         }
     }
@@ -710,6 +682,8 @@ final class RefreshController {
         /// For a stage whose failure LATCHES the exported failure state, and so
         /// pages. Sum (275s) comfortably exceeds the 3m10s backend gap measured
         /// during a full three-node roll. Worth spending to avoid a false page.
+        /// No stage uses this since the Actual import was removed (2026-10-04);
+        /// kept as the policy to reach for if a latching stage is ever added.
         static let latching: [TimeInterval] = [5, 15, 45, 90, 120]
 
         /// For a stage that is ISOLATED by design. runSureSync's result is not
@@ -794,26 +768,6 @@ final class RefreshController {
         return line.count > 120 ? String(line.prefix(120)) + "…" : line
     }
 
-    private func runSync() -> String {
-        swiftLog("runSync start, nodeBinDir=\(nodeBinDir), scriptDir=\(scriptDir)")
-        let result = runStage(
-            label: "runSync",
-            binary: "\(nodeBinDir)/actual-monmon",
-            arguments: ["import"],
-            backoff: RetryPolicy.latching,
-            // actual-monmon has no dedicated exit code for "backend unreachable",
-            // so every non-zero exit is retried. A genuinely broken config fails
-            // all 6 attempts and is still surfaced.
-            isRetryable: { $0 != 0 }
-        )
-
-        guard result.status != 0 else { return "Success" }
-        // NOTE: the "Sync failed" prefix is load-bearing — visualState matches on it.
-        return result.stderr.isEmpty
-            ? "Sync failed (exit \(result.status))"
-            : "Sync failed (exit \(result.status)): \(firstLine(result.stderr))"
-    }
-
     private func runSureSync() -> (text: String, state: SureSyncState) {
         swiftLog("runSureSync start")
         let sureBin = "\(nodeBinDir)/sure-monmon"
@@ -842,42 +796,6 @@ final class RefreshController {
                 ? "Sure sync failed (exit \(result.status))"
                 : "Sure sync failed (exit \(result.status)): \(firstLine(result.stderr))"
             return (text, .failed)
-        }
-    }
-    private func runCategorize() -> String {
-        swiftLog("runCategorize start")
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "\(nodeBinDir)/node")
-        process.arguments = ["\(scriptDir)/categorize-transactions.mjs"]
-        process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
-
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "\(nodeBinDir):\(env["PATH"] ?? "/usr/bin:/bin")"
-        // Suppress noisy @actual-app/api Breadcrumb output
-        env["NODE_NO_WARNINGS"] = "1"
-        process.environment = env
-
-        // Discard stdout/stderr — results go to .categorizer/status.json and log
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            if process.terminationStatus == 0 {
-                return "Success"
-            } else {
-                // Read error from status file instead of noisy pipe
-                let statusPath = "\(scriptDir)/.categorizer/status.json"
-                if let data = try? Data(contentsOf: URL(fileURLWithPath: statusPath)),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let lastError = json["lastError"] as? String, !lastError.isEmpty {
-                    return "Categorize failed: \(lastError)"
-                }
-                return "Categorize failed (exit \(process.terminationStatus))"
-            }
-        } catch {
-            return "Categorize failed: \(error.localizedDescription)"
         }
     }
 
@@ -1057,7 +975,7 @@ final class MetricsServer {
         }
 
         // Sure sync is ISOLATED by design (62e7e0a): its failure must not fail the
-        // pipeline or block the Actual sync / categorization, and so it is absent
+        // refresh state, and so it is absent
         // from bank_refresh_state. Isolated must not mean invisible, hence its own
         // state set. Steady states (not_configured / not_installed) are modelled
         // distinctly from failed so an alert can ignore them.
@@ -1087,12 +1005,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let statusMenuItem = NSMenuItem(title: "Status: Idle", action: nil, keyEquivalent: "")
     private let lastRefreshMenuItem = NSMenuItem(title: "Last refresh: Never", action: nil, keyEquivalent: "")
-    private let syncStatusMenuItem = NSMenuItem(title: "Sync: Idle", action: nil, keyEquivalent: "")
     private let sureStatusMenuItem = NSMenuItem(title: "Sure: Idle", action: nil, keyEquivalent: "")
     private let lastSyncMenuItem = NSMenuItem(title: "Last sync: Never", action: nil, keyEquivalent: "")
     private let nextRefreshMenuItem = NSMenuItem(title: "Next refresh: Waiting for timer", action: nil, keyEquivalent: "")
     private let refreshNowMenuItem = NSMenuItem(title: "Refresh now", action: #selector(refreshNow), keyEquivalent: "r")
-    private let syncNowMenuItem = NSMenuItem(title: "Sync now", action: #selector(syncNow), keyEquivalent: "s")
+    private let syncNowMenuItem = NSMenuItem(title: "Sync to Sure now", action: #selector(syncNow), keyEquivalent: "s")
     private let intervalMenuItem = NSMenuItem(title: "Refresh interval", action: nil, keyEquivalent: "")
     private let intervalSubmenu = NSMenu()
 
@@ -1164,14 +1081,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureMenu() {
         statusMenuItem.isEnabled = false
         lastRefreshMenuItem.isEnabled = false
-        syncStatusMenuItem.isEnabled = false
         sureStatusMenuItem.isEnabled = false
         lastSyncMenuItem.isEnabled = false
         nextRefreshMenuItem.isEnabled = false
 
         menu.addItem(statusMenuItem)
         menu.addItem(lastRefreshMenuItem)
-        menu.addItem(syncStatusMenuItem)
         menu.addItem(sureStatusMenuItem)
         menu.addItem(lastSyncMenuItem)
         menu.addItem(nextRefreshMenuItem)
@@ -1219,7 +1134,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lastRefreshMenuItem.title = "Last refresh: Never"
         }
 
-        syncStatusMenuItem.title = "Sync: \(controller.lastSyncResultText)"
         sureStatusMenuItem.title = "Sure: \(controller.lastSureSyncResultText)"
 
         if let lastSyncDate = controller.lastSyncDate {
@@ -1267,7 +1181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .refreshing:
             return ("arrow.triangle.2.circlepath.circle.fill", .systemBlue, "MoneyMoney refresh running")
         case .syncing:
-            return ("arrow.triangle.2.circlepath.circle.fill", .systemOrange, "Syncing to Actual Budget")
+            return ("arrow.triangle.2.circlepath.circle.fill", .systemOrange, "Syncing to Sure")
         case .success:
             return ("checkmark.circle.fill", .systemGreen, "MoneyMoney refresh succeeded")
         case .failure:

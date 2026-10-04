@@ -1,6 +1,14 @@
 # bank-refresh
 
-A macOS menu bar app that automatically refreshes [MoneyMoney](https://moneymoney-app.com/) bank accounts, syncs new transactions to [Actual Budget](https://actualbudget.org/), and categorizes them using a local AI model via [Ollama](https://ollama.com/).
+A macOS menu bar app that automatically refreshes [MoneyMoney](https://moneymoney-app.com/) bank accounts and syncs new transactions to a self-hosted [Sure](https://github.com/we-promise/sure) instance via `sure-monmon`.
+
+> **Actual Budget retired (2026-10-04).** The Actual Budget server was decommissioned
+> (cluster commit `ac7bf0e0`). The menu-bar app no longer runs the `actual-monmon import`
+> stage or the Actual-only AI categorizer (`categorize-transactions.mjs`); with no server
+> left, the import failed every cycle and, because it ran first, blocked the Sure sync.
+> The Actual sections below, `categorize-transactions.mjs`, `run-categorize.sh`,
+> `~/.actually/config.toml` and the global `actual-moneymoney` npm package are kept for
+> history but are **unused**.
 
 ## What it does
 
@@ -9,15 +17,11 @@ MoneyMoney (macOS banking app)
   │
   │  1. Refresh All Accounts (on timer or manual)
   ▼
-Actual Budget (self-hosted budgeting server)
+Sure (self-hosted finance app)
   │
-  │  2. Import new transactions via actual-moneymoney
+  │  2. Import new transactions via sure-monmon
   ▼
-Ollama (local LLM)
-  │
-  │  3. AI categorizes each transaction
-  ▼
-Done — transactions appear categorized in Actual Budget
+Done — transactions appear in Sure (Sure does its own categorization)
 ```
 
 The menu bar app manages the full pipeline automatically. You can also trigger each step individually.
@@ -25,8 +29,8 @@ The menu bar app manages the full pipeline automatically. You can also trigger e
 ### Menu bar features
 
 - Refresh intervals: 15 min, 2 h, 6 h, 12 h
-- Manual "Refresh now" and "Sync now" buttons
-- Status icon changes color: idle (gray), refreshing (blue), syncing/categorizing (orange), success (green), failure (red)
+- Manual "Refresh now" and "Sync to Sure now" buttons
+- Status icon changes color: idle (gray), refreshing (blue), syncing to Sure (orange), success (green), failure (red)
 - Shows last refresh time, last sync time, next scheduled refresh
 
 ## Requirements
@@ -120,7 +124,7 @@ sure-monmon import --dry-run   # preview
 sure-monmon import             # live
 ```
 
-The menu-bar app invokes `sure-monmon import` automatically after each Actual sync. Sure failures are isolated — they never block Actual sync or categorization. If `sure-monmon` is not installed the stage is skipped.
+The menu-bar app invokes `sure-monmon import` automatically after each successful MoneyMoney refresh. A Sure failure is reported on its own metric (`bank_refresh_sure_sync_state`, alerts `BankRefreshSureSync{Failing,Stale}`) and does not flip `bank_refresh_state`. If `sure-monmon` is not installed the stage is skipped.
 
 ### 4. Build and install the app
 
@@ -183,8 +187,8 @@ With thinking disabled: ~4 seconds per batch of 25 transactions.
 
 Click the icon in the menu bar:
 
-- **Refresh now** (r) — refresh MoneyMoney + sync + categorize
-- **Sync now** (s) — sync to Actual Budget + categorize (skip bank refresh)
+- **Refresh now** (r) — refresh MoneyMoney + sync to Sure
+- **Sync to Sure now** (s) — sync to Sure only (skip bank refresh)
 - **Refresh interval** — choose auto-refresh schedule
 
 ### mise tasks
