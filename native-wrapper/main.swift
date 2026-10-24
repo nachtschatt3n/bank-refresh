@@ -85,18 +85,51 @@ final class SettingsStore {
         return config
     }
 
+    /// Keys this window edits. Everything else in the file is carried over untouched.
+    private static let managedKeys: [String] = [
+        "ACTUAL_URL", "ACTUAL_PASSWORD", "ACTUAL_SYNC_ID", "ACTUAL_ACCOUNT_ID",
+        "OLLAMA_URL", "OLLAMA_MODEL", "DNS_SERVER", "METRICS_PORT",
+    ]
+
     func save(_ config: EnvConfig) {
-        let lines = [
-            "ACTUAL_URL=\(config.actualURL)",
-            "ACTUAL_PASSWORD=\(config.actualPassword)",
-            "ACTUAL_SYNC_ID=\(config.actualSyncId)",
-            "ACTUAL_ACCOUNT_ID=\(config.actualAccountId)",
-            "OLLAMA_URL=\(config.ollamaURL)",
-            "OLLAMA_MODEL=\(config.ollamaModel)",
-            "DNS_SERVER=\(config.dnsServer)",
-            "METRICS_PORT=\(config.metricsPort)",
+        let edited: [String: String] = [
+            "ACTUAL_URL": config.actualURL,
+            "ACTUAL_PASSWORD": config.actualPassword,
+            "ACTUAL_SYNC_ID": config.actualSyncId,
+            "ACTUAL_ACCOUNT_ID": config.actualAccountId,
+            "OLLAMA_URL": config.ollamaURL,
+            "OLLAMA_MODEL": config.ollamaModel,
+            "DNS_SERVER": config.dnsServer,
+            "METRICS_PORT": config.metricsPort,
         ]
-        try? lines.joined(separator: "\n").appending("\n").write(toFile: envFilePath, atomically: true, encoding: .utf8)
+
+        // Rewrite the file in place instead of regenerating it from the eight known keys:
+        // the old version silently dropped anything it did not know about (WISE_TOKEN went
+        // missing that way, with no copy anywhere). Unknown keys, comments and blank lines
+        // stay exactly where they were; known keys are updated where they sit.
+        let existing = (try? String(contentsOfFile: envFilePath, encoding: .utf8)) ?? ""
+        var written = Set<String>()
+        var out: [String] = []
+        var lines = existing.components(separatedBy: "\n")
+        if lines.last == "" { lines.removeLast() }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty, !trimmed.hasPrefix("#"), let eq = trimmed.firstIndex(of: "=") {
+                let key = String(trimmed[trimmed.startIndex..<eq]).trimmingCharacters(in: .whitespaces)
+                if let value = edited[key] {
+                    out.append("\(key)=\(value)")
+                    written.insert(key)
+                    continue
+                }
+            }
+            out.append(line)
+        }
+        for key in Self.managedKeys where !written.contains(key) {
+            out.append("\(key)=\(edited[key] ?? "")")
+        }
+
+        try? out.joined(separator: "\n").appending("\n").write(toFile: envFilePath, atomically: true, encoding: .utf8)
     }
 }
 
